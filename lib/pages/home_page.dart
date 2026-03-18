@@ -168,6 +168,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                 child: ConstrainedBox(
                   constraints: BoxConstraints(maxWidth: Responsive.maxContentWidth),
                   child: CustomScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(
+                      parent: BouncingScrollPhysics(),
+                    ),
                     slivers: [
                       // ═══ Header ═══
                       SliverToBoxAdapter(
