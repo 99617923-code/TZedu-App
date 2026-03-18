@@ -6,7 +6,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'config/theme.dart';
-import 'pages/home_page.dart';
+import 'pages/main_scaffold.dart';
 
 /// 自定义 ScrollBehavior，确保所有平台（含 iOS/Web）都能正常滚动
 class TZScrollBehavior extends MaterialScrollBehavior {
@@ -41,7 +41,7 @@ class TZIeltsApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: TZTheme.lightTheme,
       scrollBehavior: TZScrollBehavior(),
-      home: const HomePage(),
+      home: const MainScaffold(),
     );
   }
 }
