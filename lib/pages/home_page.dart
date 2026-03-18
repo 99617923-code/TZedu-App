@@ -107,15 +107,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (updateInfo.hasUpdate) {
       UpdateService.showUpdateDialog(context, updateInfo);
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('当前已是最新版本 v${updateInfo.currentVersion}'),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          backgroundColor: TZColors.green,
-          duration: const Duration(seconds: 2),
-        ),
-      );
+      UpdateService.showUpToDateSnackBar(context, updateInfo.currentVersion);
     }
   }
 
@@ -126,7 +118,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final entryCols = Responsive.quickEntryColumns(context);
     final features = HomeDataProvider.getFeatures(_currentRole);
     final quickEntries = HomeDataProvider.getQuickEntries(_currentRole);
-    final isDesktop = Responsive.isDesktop(context);
 
     return Scaffold(
       body: Container(

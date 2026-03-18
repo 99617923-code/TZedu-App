@@ -4,7 +4,6 @@
 /// 支持平台：iOS / Android / macOS / Windows / Web
 /// 一套代码，全端一致
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'config/theme.dart';
 import 'pages/home_page.dart';
 
