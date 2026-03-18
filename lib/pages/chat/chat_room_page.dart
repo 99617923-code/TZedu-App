@@ -2,20 +2,42 @@
 /// 火鹰科技出品
 ///
 /// 移动端从聊天列表点击进入的全屏聊天页面
-/// 内嵌 ChatPanel 组件，添加返回导航
+/// 支持两种模式：
+/// - 真实 IM 模式：传入 conversationId，使用 ChatPanelIM
+/// - Mock 模式：传入 chatId，使用 ChatPanel
 import 'package:flutter/material.dart';
 import '../../config/theme.dart';
 import '../../models/chat_data.dart';
 import 'chat_panel.dart';
+import 'chat_panel_im.dart';
 
 class ChatRoomPage extends StatelessWidget {
-  final String chatId;
+  /// Mock 模式使用
+  final String? chatId;
 
-  const ChatRoomPage({super.key, required this.chatId});
+  /// 真实 IM 模式使用
+  final String? conversationId;
+  final String? conversationName;
+
+  const ChatRoomPage({
+    super.key,
+    this.chatId,
+    this.conversationId,
+    this.conversationName,
+  }) : assert(chatId != null || conversationId != null);
+
+  bool get _isIMMode => conversationId != null;
 
   @override
   Widget build(BuildContext context) {
-    final chatInfo = mockChatList.where((c) => c.id == chatId).firstOrNull;
+    // Mock 模式下获取聊天信息
+    final chatInfo = chatId != null
+        ? mockChatList.where((c) => c.id == chatId).firstOrNull
+        : null;
+
+    final title = _isIMMode
+        ? (conversationName ?? '聊天')
+        : (chatInfo?.name ?? '聊天');
 
     return Scaffold(
       body: Container(
@@ -47,7 +69,7 @@ class ChatRoomPage extends StatelessWidget {
                       child: Column(
                         children: [
                           Text(
-                            chatInfo?.name ?? '聊天',
+                            title,
                             style: const TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.w700,
@@ -55,7 +77,7 @@ class ChatRoomPage extends StatelessWidget {
                             ),
                             overflow: TextOverflow.ellipsis,
                           ),
-                          if (chatInfo != null)
+                          if (!_isIMMode && chatInfo != null)
                             Text(
                               _getSubtitle(chatInfo),
                               style: TextStyle(
@@ -78,7 +100,9 @@ class ChatRoomPage extends StatelessWidget {
               ),
               // 聊天面板
               Expanded(
-                child: ChatPanel(chatId: chatId),
+                child: _isIMMode
+                    ? ChatPanelIM(conversationId: conversationId!)
+                    : ChatPanel(chatId: chatId!),
               ),
             ],
           ),

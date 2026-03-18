@@ -3,6 +3,8 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  alog_windows
+  nim_core_v2_windows
   url_launcher_windows
 )
 

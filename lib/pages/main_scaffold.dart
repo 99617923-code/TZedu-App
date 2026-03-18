@@ -6,8 +6,10 @@
 ///
 /// 对标原型：MobileTabBar + DesktopSideNav
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../config/theme.dart';
 import '../utils/responsive.dart';
+import '../services/conversation_service.dart';
 import 'home_page.dart';
 import 'chat/chat_list_page.dart';
 
@@ -115,6 +117,9 @@ class _MainScaffoldState extends State<MainScaffold> {
   }
 
   Widget _buildDesktopSideNav() {
+    // 监听真实未读数
+    final unreadCount = context.watch<TZConversationService>().totalUnreadCount;
+
     return Container(
       width: 64,
       decoration: const BoxDecoration(
@@ -159,16 +164,24 @@ class _MainScaffoldState extends State<MainScaffold> {
             index: 1,
           ),
           const SizedBox(height: 4),
-          // 功能导航
-          ..._sideNavItems.asMap().entries.map((entry) {
+          // 功能导航（消息使用真实未读数）
+          _buildSideNavItem(
+            icon: Icons.chat_bubble_outline,
+            activeIcon: Icons.chat_bubble,
+            label: '消息',
+            index: 0,
+            badge: unreadCount,
+          ),
+          const SizedBox(height: 4),
+          ..._sideNavItems.map((item) {
             return Padding(
               padding: const EdgeInsets.only(bottom: 4),
               child: _buildSideNavItem(
-                icon: entry.value.icon,
-                activeIcon: entry.value.activeIcon,
-                label: entry.value.label,
-                index: entry.value.tabIndex,
-                badge: entry.value.badge,
+                icon: item.icon,
+                activeIcon: item.activeIcon,
+                label: item.label,
+                index: item.tabIndex,
+                badge: item.badge,
               ),
             );
           }),
@@ -233,7 +246,7 @@ class _MainScaffoldState extends State<MainScaffold> {
                       ),
                       child: Center(
                         child: Text(
-                          '$badge',
+                          badge > 99 ? '99+' : '$badge',
                           style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w700),
                         ),
                       ),
@@ -259,6 +272,9 @@ class _MainScaffoldState extends State<MainScaffold> {
   }
 
   Widget _buildBottomNav() {
+    // 监听真实未读数
+    final unreadCount = context.watch<TZConversationService>().totalUnreadCount;
+
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -273,6 +289,8 @@ class _MainScaffoldState extends State<MainScaffold> {
               final i = entry.key;
               final tab = entry.value;
               final isActive = _currentIndex == i;
+              // 消息 Tab 使用真实未读数
+              final badge = i == 0 ? unreadCount : tab.badge;
               return GestureDetector(
                 onTap: () => setState(() => _currentIndex = i),
                 behavior: HitTestBehavior.opaque,
@@ -301,20 +319,20 @@ class _MainScaffoldState extends State<MainScaffold> {
                             size: 22,
                             color: isActive ? TZColors.primaryPurple : const Color(0xFF9CA3AF),
                           ),
-                          if (tab.badge > 0)
+                          if (badge > 0)
                             Positioned(
                               top: -4,
                               right: -8,
                               child: Container(
-                                width: 16,
-                                height: 16,
+                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                constraints: const BoxConstraints(minWidth: 16),
                                 decoration: const BoxDecoration(
                                   color: Color(0xFFEF4444),
-                                  shape: BoxShape.circle,
+                                  borderRadius: BorderRadius.all(Radius.circular(8)),
                                 ),
                                 child: Center(
                                   child: Text(
-                                    '${tab.badge}',
+                                    badge > 99 ? '99+' : '$badge',
                                     style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w700),
                                   ),
                                 ),
@@ -357,7 +375,7 @@ class _TabItem {
 }
 
 const List<_TabItem> _tabItems = [
-  _TabItem(label: '消息', icon: Icons.chat_bubble_outline, activeIcon: Icons.chat_bubble, badge: 5),
+  _TabItem(label: '消息', icon: Icons.chat_bubble_outline, activeIcon: Icons.chat_bubble),
   _TabItem(label: '学习', icon: Icons.menu_book_outlined, activeIcon: Icons.menu_book),
   _TabItem(label: '商城', icon: Icons.shopping_bag_outlined, activeIcon: Icons.shopping_bag),
   _TabItem(label: '直播', icon: Icons.videocam_outlined, activeIcon: Icons.videocam),
@@ -374,7 +392,6 @@ class _SideNavItem {
 }
 
 const List<_SideNavItem> _sideNavItems = [
-  _SideNavItem(icon: Icons.chat_bubble_outline, activeIcon: Icons.chat_bubble, label: '消息', tabIndex: 0, badge: 5),
   _SideNavItem(icon: Icons.menu_book_outlined, activeIcon: Icons.menu_book, label: '学习', tabIndex: 2),
   _SideNavItem(icon: Icons.assignment_outlined, activeIcon: Icons.assignment, label: '作业', tabIndex: 2),
   _SideNavItem(icon: Icons.videocam_outlined, activeIcon: Icons.videocam, label: '直播', tabIndex: 3),

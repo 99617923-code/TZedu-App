@@ -5,8 +5,14 @@
 /// 一套代码，全端一致
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:provider/provider.dart';
 import 'config/theme.dart';
 import 'pages/main_scaffold.dart';
+import 'services/im_service.dart';
+import 'services/auth_service.dart';
+import 'services/conversation_service.dart';
+import 'services/chat_message_service.dart';
+import 'services/user_info_service.dart';
 
 /// 自定义 ScrollBehavior，确保所有平台（含 iOS/Web）都能正常滚动
 class TZScrollBehavior extends MaterialScrollBehavior {
@@ -26,8 +32,15 @@ class TZScrollBehavior extends MaterialScrollBehavior {
   }
 }
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 初始化网易云信 IM SDK
+  await IMService.instance.initialize();
+
+  // 尝试自动登录（从本地存储恢复 Token）
+  await AuthService.instance.tryAutoLogin();
+
   runApp(const TZIeltsApp());
 }
 
@@ -36,12 +49,21 @@ class TZIeltsApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: '途正英语',
-      debugShowCheckedModeBanner: false,
-      theme: TZTheme.lightTheme,
-      scrollBehavior: TZScrollBehavior(),
-      home: const MainScaffold(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: IMService.instance),
+        ChangeNotifierProvider.value(value: AuthService.instance),
+        ChangeNotifierProvider.value(value: TZConversationService.instance),
+        ChangeNotifierProvider.value(value: ChatMessageService.instance),
+        ChangeNotifierProvider.value(value: UserInfoService.instance),
+      ],
+      child: MaterialApp(
+        title: '途正英语',
+        debugShowCheckedModeBanner: false,
+        theme: TZTheme.lightTheme,
+        scrollBehavior: TZScrollBehavior(),
+        home: const MainScaffold(),
+      ),
     );
   }
 }
