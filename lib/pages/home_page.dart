@@ -163,15 +163,13 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             ),
 
             // 主内容
-            SafeArea(
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: Responsive.maxContentWidth),
-                  child: CustomScrollView(
-                    physics: const AlwaysScrollableScrollPhysics(
-                      parent: BouncingScrollPhysics(),
-                    ),
-                    slivers: [
+            Positioned.fill(
+              child: SafeArea(
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: Responsive.maxContentWidth),
+                    child: CustomScrollView(
+                      slivers: [
                       // ═══ Header ═══
                       SliverToBoxAdapter(
                         child: Padding(
@@ -358,7 +356,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                           ),
                         ),
                       ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),

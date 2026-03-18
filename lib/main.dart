@@ -4,8 +4,27 @@
 /// 支持平台：iOS / Android / macOS / Windows / Web
 /// 一套代码，全端一致
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'config/theme.dart';
 import 'pages/home_page.dart';
+
+/// 自定义 ScrollBehavior，确保所有平台（含 iOS/Web）都能正常滚动
+class TZScrollBehavior extends MaterialScrollBehavior {
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+    PointerDeviceKind.touch,
+    PointerDeviceKind.mouse,
+    PointerDeviceKind.stylus,
+    PointerDeviceKind.trackpad,
+  };
+
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) {
+    return const BouncingScrollPhysics(
+      parent: AlwaysScrollableScrollPhysics(),
+    );
+  }
+}
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,6 +40,7 @@ class TZIeltsApp extends StatelessWidget {
       title: '途正英语',
       debugShowCheckedModeBanner: false,
       theme: TZTheme.lightTheme,
+      scrollBehavior: TZScrollBehavior(),
       home: const HomePage(),
     );
   }
