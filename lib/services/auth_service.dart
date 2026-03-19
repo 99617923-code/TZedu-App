@@ -3,7 +3,7 @@
 ///
 /// 职责：
 /// 1. 调用自建后端的登录 API
-/// 2. 获取业务 Token + IM Token
+/// 2. 获取业务 Token + IM Token + AppKey
 /// 3. 自动登录网易云信 IM
 /// 4. Token 持久化存储
 /// 5. 单点登录（SSO）支持
@@ -89,6 +89,8 @@ class AuthService extends ChangeNotifier {
   String? _bizToken;
   String? get bizToken => _bizToken;
 
+  String? _refreshToken;
+
   bool _isLoggedIn = false;
   bool get isLoggedIn => _isLoggedIn;
 
@@ -97,36 +99,35 @@ class AuthService extends ChangeNotifier {
 
   // 持久化 Key
   static const String _keyBizToken = 'tz_biz_token';
+  static const String _keyRefreshToken = 'tz_refresh_token';
   static const String _keyImAccid = 'tz_im_accid';
   static const String _keyImToken = 'tz_im_token';
+  static const String _keyImAppKey = 'tz_im_app_key';
   static const String _keyUserProfile = 'tz_user_profile';
 
   // ═══════════════════════════════════════════════════════
   // 登录
   // ═══════════════════════════════════════════════════════
 
-  /// 手机号 + 验证码登录
-  Future<LoginResult> loginWithPhone(String phone, String code) async {
+  /// 手机号 + 密码登录（适配后端当前接口）
+  Future<LoginResult> loginWithPassword(String phone, String password) async {
     return _doLogin({
-      'login_type': 'phone',
       'phone': phone,
-      'code': code,
+      'password': password,
     });
   }
 
-  /// 手机号 + 密码登录
-  Future<LoginResult> loginWithPassword(String phone, String password) async {
+  /// 手机号 + 验证码登录
+  Future<LoginResult> loginWithPhone(String phone, String code) async {
     return _doLogin({
-      'login_type': 'password',
       'phone': phone,
-      'password': password,
+      'code': code,
     });
   }
 
   /// 微信授权登录
   Future<LoginResult> loginWithWechat(String wxCode) async {
     return _doLogin({
-      'login_type': 'wechat',
       'wx_code': wxCode,
     });
   }
@@ -162,25 +163,34 @@ class AuthService extends ChangeNotifier {
       // 2. 解析用户信息
       _currentUser = UserProfile.fromJson(data['user_info']);
       _bizToken = data['biz_token'] as String;
+      _refreshToken = data['refresh_token'] as String?;
 
       // 3. 解析 IM 凭证
       final imAuth = data['im_auth'] as Map<String, dynamic>;
-      final accid = imAuth['accid'] as String;
+      final accid = imAuth['accid']?.toString() ?? '';
       final imToken = imAuth['im_token'] as String;
 
-      // 4. 持久化存储
-      await _saveTokens(accid, imToken);
-
-      // 5. 登录网易云信 IM
-      final imSuccess = await IMService.instance.login(accid, imToken);
-      if (!imSuccess) {
-        _log('IM 登录失败，但业务登录成功');
-        // IM 登录失败不阻塞业务，后续会自动重连
+      // 4. 从 im_auth 中获取 AppKey（后端下发）
+      if (imAuth.containsKey('app_key') && imAuth['app_key'] != null) {
+        IMConfig.setAppKey(imAuth['app_key'] as String);
+        _log('已从后端获取 AppKey');
       }
 
-      // 6. 初始化 IM 相关服务
-      if (imSuccess) {
-        await _initIMServices();
+      // 5. 持久化存储
+      await _saveTokens(accid, imToken);
+
+      // 6. 登录网易云信 IM（需要 AppKey 已设置）
+      if (IMConfig.appKey.isNotEmpty) {
+        final imSuccess = await IMService.instance.login(accid, imToken);
+        if (!imSuccess) {
+          _log('IM 登录失败，但业务登录成功');
+          // IM 登录失败不阻塞业务，后续会自动重连
+        } else {
+          // 7. 初始化 IM 相关服务
+          await _initIMServices();
+        }
+      } else {
+        _log('AppKey 未配置，跳过 IM 登录');
       }
 
       _isLoggedIn = true;
@@ -211,7 +221,9 @@ class AuthService extends ChangeNotifier {
       final accid = prefs.getString(_keyImAccid);
       final imToken = prefs.getString(_keyImToken);
       final bizToken = prefs.getString(_keyBizToken);
+      final refreshToken = prefs.getString(_keyRefreshToken);
       final userJson = prefs.getString(_keyUserProfile);
+      final appKey = prefs.getString(_keyImAppKey);
 
       if (accid == null || imToken == null || bizToken == null) {
         _log('无本地凭证，需要重新登录');
@@ -219,25 +231,51 @@ class AuthService extends ChangeNotifier {
       }
 
       _bizToken = bizToken;
+      _refreshToken = refreshToken;
+
+      // 恢复 AppKey
+      if (appKey != null && appKey.isNotEmpty) {
+        IMConfig.setAppKey(appKey);
+      }
 
       // 恢复用户信息
       if (userJson != null) {
         _currentUser = UserProfile.fromJson(jsonDecode(userJson));
       }
 
-      // 登录 IM
-      final imSuccess = await IMService.instance.login(accid, imToken);
-      if (imSuccess) {
-        await _initIMServices();
-        _isLoggedIn = true;
-        notifyListeners();
-        _log('自动登录成功');
-        return true;
-      } else {
-        _log('IM Token 过期，需要重新登录');
-        await _clearTokens();
-        return false;
+      // 先尝试调用 /auth/me 验证 biz_token 是否有效
+      final meResult = await _fetchMe();
+      if (!meResult) {
+        // biz_token 过期，尝试用 refresh_token 刷新
+        if (_refreshToken != null) {
+          final refreshed = await refreshBizToken();
+          if (!refreshed) {
+            _log('Token 刷新失败，需要重新登录');
+            await _clearTokens();
+            return false;
+          }
+        } else {
+          _log('无 refresh_token，需要重新登录');
+          await _clearTokens();
+          return false;
+        }
       }
+
+      // 登录 IM
+      if (IMConfig.appKey.isNotEmpty) {
+        final imSuccess = await IMService.instance.login(accid, imToken);
+        if (imSuccess) {
+          await _initIMServices();
+        } else {
+          _log('IM Token 过期，尝试重新获取');
+          // IM 登录失败不阻塞，业务仍然可用
+        }
+      }
+
+      _isLoggedIn = true;
+      notifyListeners();
+      _log('自动登录成功');
+      return true;
     } catch (e) {
       _log('自动登录异常: $e');
       return false;
@@ -251,11 +289,11 @@ class AuthService extends ChangeNotifier {
   /// 登出
   Future<void> logout() async {
     try {
-      // 通知后端登出（可选）
+      // 通知后端登出
       if (_bizToken != null) {
         try {
           await http.post(
-            Uri.parse('${IMConfig.apiBaseUrl}/api/v1/auth/logout'),
+            Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.logoutPath}'),
             headers: {
               'Content-Type': 'application/json',
               'Authorization': 'Bearer $_bizToken',
@@ -274,6 +312,7 @@ class AuthService extends ChangeNotifier {
 
       _currentUser = null;
       _bizToken = null;
+      _refreshToken = null;
       _isLoggedIn = false;
       notifyListeners();
 
@@ -284,40 +323,109 @@ class AuthService extends ChangeNotifier {
   }
 
   // ═══════════════════════════════════════════════════════
-  // Token 刷新
+  // Token 刷新（适配后端：refresh_token 通过 POST body 传递）
   // ═══════════════════════════════════════════════════════
 
   /// 刷新业务 Token
-  Future<bool> refreshToken() async {
-    if (_bizToken == null) return false;
+  /// 后端接口：POST /api/v1/auth/refresh-token
+  /// 请求体：{ "refresh_token": "xxx" }
+  /// 响应体：{ "code": 200, "data": { "biz_token": "xxx", "refresh_token": "xxx" } }
+  Future<bool> refreshBizToken() async {
+    if (_refreshToken == null) return false;
 
     try {
+      _log('正在刷新 Token...');
+
       final response = await http.post(
         Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.refreshTokenPath}'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $_bizToken',
-        },
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'refresh_token': _refreshToken}),
       );
 
       if (response.statusCode == 200) {
         final body = jsonDecode(response.body) as Map<String, dynamic>;
         if (body['code'] == 200) {
           final data = body['data'] as Map<String, dynamic>;
+
+          // 更新双令牌
           _bizToken = data['biz_token'] as String;
+          _refreshToken = data['refresh_token'] as String?;
 
           // 如果返回了新的 IM Token，也更新
-          if (data.containsKey('im_auth')) {
+          if (data.containsKey('im_auth') && data['im_auth'] != null) {
             final imAuth = data['im_auth'] as Map<String, dynamic>;
-            await _saveTokens(imAuth['accid'], imAuth['im_token']);
+            final accid = imAuth['accid']?.toString() ?? '';
+            final imToken = imAuth['im_token'] as String;
+            await _saveTokens(accid, imToken);
+
+            // 更新 AppKey
+            if (imAuth.containsKey('app_key') && imAuth['app_key'] != null) {
+              IMConfig.setAppKey(imAuth['app_key'] as String);
+            }
+          }
+
+          // 持久化新的 biz_token 和 refresh_token
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(_keyBizToken, _bizToken!);
+          if (_refreshToken != null) {
+            await prefs.setString(_keyRefreshToken, _refreshToken!);
+          }
+
+          _log('Token 刷新成功');
+          return true;
+        }
+      }
+
+      _log('Token 刷新失败: ${response.statusCode}');
+      return false;
+    } catch (e) {
+      _log('刷新 Token 异常: $e');
+      return false;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 获取当前用户信息
+  // ═══════════════════════════════════════════════════════
+
+  /// 调用 /auth/me 获取最新用户信息和 IM 凭证
+  Future<bool> _fetchMe() async {
+    if (_bizToken == null) return false;
+
+    try {
+      final response = await http.get(
+        Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.mePath}'),
+        headers: {'Authorization': 'Bearer $_bizToken'},
+      );
+
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        if (body['code'] == 200) {
+          final data = body['data'] as Map<String, dynamic>;
+
+          // 更新用户信息
+          _currentUser = UserProfile.fromJson(data['user_info']);
+
+          // 更新 IM 凭证
+          if (data.containsKey('im_auth') && data['im_auth'] != null) {
+            final imAuth = data['im_auth'] as Map<String, dynamic>;
+            final accid = imAuth['accid']?.toString() ?? '';
+            final imToken = imAuth['im_token'] as String;
+            await _saveTokens(accid, imToken);
+
+            // 更新 AppKey
+            if (imAuth.containsKey('app_key') && imAuth['app_key'] != null) {
+              IMConfig.setAppKey(imAuth['app_key'] as String);
+            }
           }
 
           return true;
         }
       }
+
       return false;
     } catch (e) {
-      _log('刷新 Token 异常: $e');
+      _log('获取用户信息异常: $e');
       return false;
     }
   }
@@ -341,6 +449,12 @@ class AuthService extends ChangeNotifier {
     if (_bizToken != null) {
       await prefs.setString(_keyBizToken, _bizToken!);
     }
+    if (_refreshToken != null) {
+      await prefs.setString(_keyRefreshToken, _refreshToken!);
+    }
+    if (IMConfig.appKey.isNotEmpty) {
+      await prefs.setString(_keyImAppKey, IMConfig.appKey);
+    }
     if (_currentUser != null) {
       await prefs.setString(_keyUserProfile, jsonEncode(_currentUser!.toJson()));
     }
@@ -351,7 +465,9 @@ class AuthService extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_keyImAccid);
     await prefs.remove(_keyImToken);
+    await prefs.remove(_keyImAppKey);
     await prefs.remove(_keyBizToken);
+    await prefs.remove(_keyRefreshToken);
     await prefs.remove(_keyUserProfile);
   }
 
