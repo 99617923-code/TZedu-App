@@ -9,11 +9,14 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../config/im_config.dart';
 import 'auth_service.dart';
+
+// 条件导入：Web 端不支持 dart:io
+import 'platform_helper_stub.dart'
+    if (dart.library.io) 'device_platform_io.dart' as devicePlatform;
 
 class DeviceService {
   static final DeviceService _instance = DeviceService._internal();
@@ -145,39 +148,14 @@ class DeviceService {
   // ═══════════════════════════════════════════════════════
 
   Map<String, dynamic> _collectDeviceInfo() {
-    String platform = 'unknown';
-    String osVersion = '';
-
-    if (!kIsWeb) {
-      try {
-        if (Platform.isIOS) {
-          platform = 'ios';
-          osVersion = Platform.operatingSystemVersion;
-        } else if (Platform.isAndroid) {
-          platform = 'android';
-          osVersion = Platform.operatingSystemVersion;
-        } else if (Platform.isMacOS) {
-          platform = 'macos';
-          osVersion = Platform.operatingSystemVersion;
-        } else if (Platform.isWindows) {
-          platform = 'windows';
-          osVersion = Platform.operatingSystemVersion;
-        } else if (Platform.isLinux) {
-          platform = 'linux';
-          osVersion = Platform.operatingSystemVersion;
-        }
-      } catch (_) {
-        // Platform not available
-      }
-    } else {
-      platform = 'web';
+    if (kIsWeb) {
+      return {
+        'platform': 'web',
+        'osVersion': '',
+        'appVersion': '1.0.0',
+      };
     }
-
-    return {
-      'platform': platform,
-      'osVersion': osVersion,
-      'appVersion': '1.0.0',
-    };
+    return devicePlatform.collectNativeDeviceInfo();
   }
 
   void _log(String message) {

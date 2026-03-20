@@ -267,14 +267,9 @@ class AuthService extends ChangeNotifier {
       // 5. 持久化存储
       await _saveTokens(accid, imToken);
 
-      // 6. 登录网易云信 IM
+      // 6. 登录网易云信 IM（异步执行，不阻塞业务登录）
       if (IMConfig.appKey.isNotEmpty) {
-        final imSuccess = await IMService.instance.login(accid, imToken);
-        if (!imSuccess) {
-          _log('IM 登录失败，但业务登录成功');
-        } else {
-          await _initIMServices();
-        }
+        _loginIMAsync(accid, imToken);
       } else {
         _log('AppKey 未配置，跳过 IM 登录');
       }
@@ -347,13 +342,13 @@ class AuthService extends ChangeNotifier {
         }
       }
 
-      // 登录 IM
+      // 登录 IM（异步执行，不阻塞自动登录）
       if (IMConfig.appKey.isNotEmpty) {
-        final imSuccess = await IMService.instance.login(accid, imToken);
-        if (imSuccess) {
-          await _initIMServices();
-        } else {
-          _log('IM Token 可能过期，不阻塞业务');
+        final prefs2 = await SharedPreferences.getInstance();
+        final savedAccid = prefs2.getString(_keyImAccid);
+        final savedImToken = prefs2.getString(_keyImToken);
+        if (savedAccid != null && savedImToken != null) {
+          _loginIMAsync(savedAccid, savedImToken);
         }
       }
 
@@ -557,11 +552,31 @@ class AuthService extends ChangeNotifier {
   // 内部方法
   // ═══════════════════════════════════════════════════════
 
+  /// 异步登录 IM（不阻塞主流程，防止原生 SDK 崩溃拖垮 App）
+  Future<void> _loginIMAsync(String accid, String imToken) async {
+    try {
+      _log('异步登录 IM...');
+      final imSuccess = await IMService.instance.login(accid, imToken);
+      if (imSuccess) {
+        await _initIMServices();
+        _log('IM 登录并初始化服务成功');
+      } else {
+        _log('IM 登录失败，不影响业务功能');
+      }
+    } catch (e) {
+      _log('IM 登录异常（已安全捕获）: $e');
+    }
+  }
+
   /// 初始化 IM 相关服务
   Future<void> _initIMServices() async {
-    await TZConversationService.instance.initialize();
-    ChatMessageService.instance.initialize();
-    UserInfoService.instance.setupListeners();
+    try {
+      await TZConversationService.instance.initialize();
+      ChatMessageService.instance.initialize();
+      UserInfoService.instance.setupListeners();
+    } catch (e) {
+      _log('IM 服务初始化异常: $e');
+    }
   }
 
   /// 保存 Token 到本地

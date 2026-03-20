@@ -3,6 +3,7 @@
 ///
 /// 支持平台：iOS / Android / macOS / Windows / Web
 /// 一套代码，全端一致
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:provider/provider.dart';
@@ -38,11 +39,17 @@ class TZScrollBehavior extends MaterialScrollBehavior {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 初始化网易云信 IM SDK
-  await IMService.instance.initialize();
+  // IM SDK 不在启动时初始化，改为延迟加载（登录成功后或进入聊天时触发）
+  // 避免 nim_core_v2 原生 SDK 在 macOS/iOS 上导致 Dart VM 崩溃
 
   // 尝试自动登录（从本地存储恢复 Token）
-  await AuthService.instance.tryAutoLogin();
+  try {
+    await AuthService.instance.tryAutoLogin();
+  } catch (e) {
+    if (kDebugMode) {
+      print('[TZ] 自动登录异常: $e');
+    }
+  }
 
   runApp(const TZIeltsApp());
 }

@@ -2,23 +2,27 @@
 /// 火鹰科技出品
 ///
 /// 职责：
-/// 1. SDK 初始化（按平台选择 NIMAndroidSDKOptions / NIMIOSSDKOptions / NIMWebSDKOptions）
-/// 2. 登录/登出（accid + token 由后端下发）
-/// 3. 连接状态管理与监听
-/// 4. 全局单例，供各页面调用
+/// 1. SDK 延迟初始化（进入聊天页面或登录成功后触发）
+/// 2. 按平台选择 NIMAndroidSDKOptions / NIMIOSSDKOptions / NIMWebSDKOptions
+/// 3. 登录/登出（accid + token 由后端下发）
+/// 4. 连接状态管理与监听
+/// 5. 全局单例，供各页面调用
 ///
 /// 使用方式：
-///   await IMService.instance.initialize();
+///   await IMService.instance.ensureInitialized(); // 延迟初始化
 ///   await IMService.instance.login(accid, token);
 ///
 /// 注意：用户体系完全自建，此处只负责 IM SDK 的登录，
 /// 不涉及业务用户注册/登录逻辑。
 
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:nim_core_v2/nim_core.dart';
 import '../config/im_config.dart';
+
+// 条件导入：Web 端不支持 dart:io
+import 'platform_helper_stub.dart'
+    if (dart.library.io) 'platform_helper_io.dart' as platform;
 
 /// IM 连接状态枚举
 enum IMConnectionStatus {
@@ -46,6 +50,8 @@ class IMService extends ChangeNotifier {
   bool _isInitialized = false;
   bool get isInitialized => _isInitialized;
 
+  bool _isInitializing = false;
+
   IMConnectionStatus _connectionStatus = IMConnectionStatus.disconnected;
   IMConnectionStatus get connectionStatus => _connectionStatus;
 
@@ -53,6 +59,10 @@ class IMService extends ChangeNotifier {
   String? get currentAccid => _currentAccid;
 
   bool get isLoggedIn => _connectionStatus == IMConnectionStatus.loggedIn;
+
+  /// 初始化失败的错误信息（用于 UI 展示）
+  String? _initError;
+  String? get initError => _initError;
 
   /// 连接状态变化流（供 UI 监听）
   final StreamController<IMConnectionStatus> _statusController =
@@ -71,16 +81,32 @@ class IMService extends ChangeNotifier {
   StreamSubscription<NIMConnectStatus>? _connectStatusSub;
 
   // ═══════════════════════════════════════════════════════
-  // 初始化
+  // 延迟初始化
   // ═══════════════════════════════════════════════════════
 
-  /// 初始化网易云信 SDK
-  /// 应在 main() 中 runApp 之前调用
+  /// 确保 SDK 已初始化（延迟加载，首次调用时才初始化）
+  /// 在进入聊天页面或登录成功后调用
+  Future<bool> ensureInitialized() async {
+    if (_isInitialized) return true;
+    if (_isInitializing) {
+      // 等待正在进行的初始化完成
+      while (_isInitializing) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      return _isInitialized;
+    }
+    return initialize();
+  }
+
+  /// 初始化网易云信 SDK（内部方法）
   Future<bool> initialize() async {
     if (_isInitialized) {
       _log('SDK 已初始化，跳过');
       return true;
     }
+
+    _isInitializing = true;
+    _initError = null;
 
     try {
       _log('开始初始化网易云信 SDK...');
@@ -89,6 +115,8 @@ class IMService extends ChangeNotifier {
       final options = _buildSDKOptions();
       if (options == null) {
         _log('当前平台不支持 IM SDK');
+        _initError = '当前平台不支持 IM';
+        _isInitializing = false;
         return false;
       }
 
@@ -97,18 +125,27 @@ class IMService extends ChangeNotifier {
 
       if (result.isSuccess) {
         _isInitialized = true;
+        _initError = null;
         _log('SDK 初始化成功');
 
         // 注册监听器
         _setupListeners();
 
+        _isInitializing = false;
+        notifyListeners();
         return true;
       } else {
-        _log('SDK 初始化失败: ${result.errorDetails}');
+        _initError = 'SDK 初始化失败: ${result.errorDetails}';
+        _log(_initError!);
+        _isInitializing = false;
+        notifyListeners();
         return false;
       }
     } catch (e) {
-      _log('SDK 初始化异常: $e');
+      _initError = 'SDK 初始化异常: $e';
+      _log(_initError!);
+      _isInitializing = false;
+      notifyListeners();
       return false;
     }
   }
@@ -123,29 +160,10 @@ class IMService extends ChangeNotifier {
           apiVersion: 'v2',
         ),
       );
-    } else if (Platform.isAndroid) {
-      return NIMAndroidSDKOptions(
-        appKey: IMConfig.appKey,
-        shouldSyncUnreadCount: true,
-        enableTeamMessageReadReceipt: true,
-        shouldConsiderRevokedMessageUnreadCount: true,
-        enablePreloadMessageAttachment: true,
-      );
-    } else if (Platform.isIOS) {
-      return NIMIOSSDKOptions(
-        appKey: IMConfig.appKey,
-        shouldSyncUnreadCount: true,
-        enableTeamMessageReadReceipt: true,
-        shouldConsiderRevokedMessageUnreadCount: true,
-        enablePreloadMessageAttachment: true,
-      );
-    } else if (Platform.isMacOS || Platform.isWindows) {
-      return NIMPCSDKOptions(
-        appKey: IMConfig.appKey,
-        basicOption: NIMBasicOption(),
-      );
     }
-    return null;
+
+    // 非 Web 端使用条件导入的平台检测
+    return platform.buildNativeSDKOptions(IMConfig.appKey);
   }
 
   // ═══════════════════════════════════════════════════════
@@ -156,7 +174,9 @@ class IMService extends ChangeNotifier {
   /// [accid] 网易云信账号 ID（由后端在用户登录时返回）
   /// [token] IM Token（由后端在用户登录时返回）
   Future<bool> login(String accid, String token) async {
-    if (!_isInitialized) {
+    // 确保 SDK 已初始化
+    final initialized = await ensureInitialized();
+    if (!initialized) {
       _log('SDK 未初始化，无法登录');
       return false;
     }

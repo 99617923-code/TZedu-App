@@ -6,6 +6,7 @@
 /// 手机端：大卡片竖排 + 快捷入口1列
 /// 平板端：大卡片横向并排 + 快捷入口2列
 /// 桌面端：大卡片3列 + 快捷入口3列
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../config/theme.dart';
 import '../config/constants.dart';
@@ -386,9 +387,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Widget _buildFeatureGrid(List<FeatureCardData> features, int columns) {
     return LayoutBuilder(
       builder: (context, constraints) {
+        final maxW = constraints.maxWidth;
+        if (maxW <= 0) return const SizedBox.shrink();
         final spacing = 12.0;
-        final availableWidth = constraints.maxWidth - (spacing * (columns - 1));
-        final itemWidth = availableWidth / columns;
+        final availableWidth = math.max(0.0, maxW - (spacing * (columns - 1)));
+        final itemWidth = math.max(0.0, availableWidth / columns);
 
         return Wrap(
           spacing: spacing,
@@ -396,7 +399,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           children: features.map((f) {
             // 第一张大卡片在手机端占满宽度
             final width = (f.isLarge && columns == 2)
-                ? constraints.maxWidth
+                ? maxW
                 : itemWidth;
             return SizedBox(
               width: width,
@@ -414,16 +417,18 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Widget _buildQuickEntryGrid(List<QuickEntryData> entries, int columns) {
     return LayoutBuilder(
       builder: (context, constraints) {
+        final maxW = constraints.maxWidth;
+        if (maxW <= 0) return const SizedBox.shrink();
         final spacing = 8.0;
-        final availableWidth = constraints.maxWidth - (spacing * (columns - 1));
-        final itemWidth = availableWidth / columns;
+        final availableWidth = math.max(0.0, maxW - (spacing * (columns - 1)));
+        final itemWidth = math.max(0.0, availableWidth / columns);
 
         return Wrap(
           spacing: spacing,
           runSpacing: spacing,
           children: entries.map((e) {
             return SizedBox(
-              width: columns == 1 ? constraints.maxWidth : itemWidth,
+              width: columns == 1 ? maxW : itemWidth,
               child: QuickEntry(
                 data: e,
                 onTap: () => _showFeatureComingSoon(e.label),
