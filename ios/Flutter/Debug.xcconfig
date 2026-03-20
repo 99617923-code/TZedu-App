@@ -1,1 +1,2 @@
+#include? "Pods-Runner.debug.xcconfig"
 #include "Generated.xcconfig"
