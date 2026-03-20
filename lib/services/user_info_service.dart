@@ -62,9 +62,11 @@ class UserInfoService extends ChangeNotifier {
   // 安全检查
   // ═══════════════════════════════════════════════════════
 
-  /// 检查 IM SDK 是否已初始化且已登录
+  /// 检查 IM SDK 是否已初始化、已登录且数据同步完成
   bool get _isIMReady =>
-      IMService.instance.isInitialized && IMService.instance.isLoggedIn;
+      IMService.instance.isInitialized &&
+      IMService.instance.isLoggedIn &&
+      IMService.instance.isDataSyncCompleted;
 
   // ═══════════════════════════════════════════════════════
   // 查询

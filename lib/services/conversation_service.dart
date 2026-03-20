@@ -94,21 +94,37 @@ class TZConversationService extends ChangeNotifier {
   // 安全检查
   // ═══════════════════════════════════════════════════════
 
-  /// 检查 IM SDK 是否已初始化且已登录
+  /// 检查 IM SDK 是否已初始化、已登录且数据同步完成
   /// 这是防止原生层 abort() 的关键守卫
+  /// NIM PC SDK（macOS/Windows）要求数据同步完成后才能查询会话列表
   bool get _isIMReady =>
-      IMService.instance.isInitialized && IMService.instance.isLoggedIn;
+      IMService.instance.isInitialized &&
+      IMService.instance.isLoggedIn &&
+      IMService.instance.isDataSyncCompleted;
 
   // ═══════════════════════════════════════════════════════
   // 初始化与监听
   // ═══════════════════════════════════════════════════════
 
-  /// 初始化会话服务（在 IM 登录成功后调用）
+  /// 初始化会话服务（在 IM 登录且数据同步完成后调用）
+  /// 会先等待数据同步完成，再加载会话列表
   Future<void> initialize() async {
-    if (!_isIMReady) {
+    final imService = IMService.instance;
+
+    if (!imService.isInitialized || !imService.isLoggedIn) {
       _log('IM 未就绪（未初始化或未登录），跳过会话服务初始化');
       return;
     }
+
+    // 关键：等待数据同步完成后再查询会话列表
+    // NIM PC SDK 在同步完成前调用 getConversationList 会导致原生层 abort()
+    _log('等待 IM 数据同步完成...');
+    final syncOk = await imService.waitForDataSync(timeout: const Duration(seconds: 15));
+    if (!syncOk) {
+      _log('数据同步等待失败，跳过会话加载');
+      return;
+    }
+    _log('数据同步已完成，开始加载会话列表');
 
     _setupListeners();
     await loadConversations();

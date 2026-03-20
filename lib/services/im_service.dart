@@ -6,11 +6,13 @@
 /// 2. 按平台选择 NIMAndroidSDKOptions / NIMIOSSDKOptions / NIMWebSDKOptions
 /// 3. 登录/登出（accid + token 由后端下发）
 /// 4. 连接状态管理与监听
-/// 5. 全局单例，供各页面调用
+/// 5. 数据同步状态管理（防止同步完成前调用 SDK 导致原生层崩溃）
+/// 6. 全局单例，供各页面调用
 ///
 /// 使用方式：
 ///   await IMService.instance.ensureInitialized(); // 延迟初始化
 ///   await IMService.instance.login(accid, token);
+///   await IMService.instance.waitForDataSync();   // 等待数据同步完成
 ///
 /// 注意：用户体系完全自建，此处只负责 IM SDK 的登录，
 /// 不涉及业务用户注册/登录逻辑。
@@ -64,6 +66,35 @@ class IMService extends ChangeNotifier {
   String? _initError;
   String? get initError => _initError;
 
+  // ═══════════════════════════════════════════════════════
+  // 数据同步状态（关键：防止同步完成前调用 SDK 导致崩溃）
+  // ═══════════════════════════════════════════════════════
+
+  /// 数据同步是否完成（NIM PC SDK 要求同步完成后才能查询会话等数据）
+  bool _isDataSyncCompleted = false;
+  bool get isDataSyncCompleted => _isDataSyncCompleted;
+
+  /// 数据同步完成的 Completer（供外部 await 等待）
+  Completer<void>? _dataSyncCompleter;
+
+  /// 等待数据同步完成（带超时保护）
+  /// 返回 true 表示同步完成，false 表示超时
+  Future<bool> waitForDataSync({Duration timeout = const Duration(seconds: 15)}) async {
+    if (_isDataSyncCompleted) return true;
+    if (_dataSyncCompleter == null) return false;
+
+    try {
+      await _dataSyncCompleter!.future.timeout(timeout);
+      return _isDataSyncCompleted;
+    } on TimeoutException {
+      _log('等待数据同步超时（${timeout.inSeconds}s），强制标记为完成');
+      // 超时后也标记为完成，避免永远卡住
+      _isDataSyncCompleted = true;
+      notifyListeners();
+      return true;
+    }
+  }
+
   /// 连接状态变化流（供 UI 监听）
   final StreamController<IMConnectionStatus> _statusController =
       StreamController<IMConnectionStatus>.broadcast();
@@ -74,11 +105,19 @@ class IMService extends ChangeNotifier {
       StreamController<String>.broadcast();
   Stream<String> get kickedStream => _kickedController.stream;
 
+  /// 数据同步完成事件流（供外部监听）
+  final StreamController<void> _dataSyncFinishedController =
+      StreamController<void>.broadcast();
+  Stream<void> get dataSyncFinishedStream => _dataSyncFinishedController.stream;
+
   // Stream 订阅
   StreamSubscription<NIMLoginStatus>? _loginStatusSub;
   StreamSubscription<dynamic>? _loginFailedSub;
   StreamSubscription<NIMKickedOfflineDetail>? _kickedSub;
   StreamSubscription<NIMConnectStatus>? _connectStatusSub;
+  StreamSubscription<NIMDataSyncDetail>? _dataSyncSub;
+  StreamSubscription<void>? _convSyncFinishedSub;
+  StreamSubscription<void>? _convSyncFailedSub;
 
   // ═══════════════════════════════════════════════════════
   // 延迟初始化
@@ -181,6 +220,10 @@ class IMService extends ChangeNotifier {
       return false;
     }
 
+    // 重置数据同步状态
+    _isDataSyncCompleted = false;
+    _dataSyncCompleter = Completer<void>();
+
     try {
       _updateStatus(IMConnectionStatus.connecting);
       _log('正在登录 IM，accid: $accid');
@@ -196,16 +239,19 @@ class IMService extends ChangeNotifier {
       if (result.isSuccess) {
         _currentAccid = accid;
         _updateStatus(IMConnectionStatus.loggedIn);
-        _log('IM 登录成功');
+        _log('IM 登录成功，等待数据同步...');
         return true;
       } else {
         _updateStatus(IMConnectionStatus.disconnected);
         _log('IM 登录失败: ${result.errorDetails}');
+        // 登录失败也完成 Completer，避免永远等待
+        _completeDataSync();
         return false;
       }
     } catch (e) {
       _updateStatus(IMConnectionStatus.disconnected);
       _log('IM 登录异常: $e');
+      _completeDataSync();
       return false;
     }
   }
@@ -218,6 +264,8 @@ class IMService extends ChangeNotifier {
       _log('正在登出 IM...');
       await NimCore.instance.loginService.logout();
       _currentAccid = null;
+      _isDataSyncCompleted = false;
+      _dataSyncCompleter = null;
       _updateStatus(IMConnectionStatus.disconnected);
       _log('IM 已登出');
     } catch (e) {
@@ -241,6 +289,7 @@ class IMService extends ChangeNotifier {
           _updateStatus(IMConnectionStatus.loggedIn);
           break;
         case NIMLoginStatus.loginStatusLogout:
+          _isDataSyncCompleted = false;
           _updateStatus(IMConnectionStatus.disconnected);
           break;
         case NIMLoginStatus.loginStatusLogining:
@@ -255,12 +304,14 @@ class IMService extends ChangeNotifier {
     _loginFailedSub = loginService.onLoginFailed.listen((error) {
       _log('登录失败回调: ${error.code} ${error.desc}');
       _updateStatus(IMConnectionStatus.disconnected);
+      _completeDataSync();
     });
 
     // 被踢下线监听
     _kickedSub = loginService.onKickedOffline.listen((detail) {
       _log('被踢下线');
       _currentAccid = null;
+      _isDataSyncCompleted = false;
       _updateStatus(IMConnectionStatus.kicked);
       _kickedController.add('您的账号在其他设备登录');
     });
@@ -285,11 +336,56 @@ class IMService extends ChangeNotifier {
           break;
       }
     });
+
+    // ═══ 数据同步监听（关键！防止同步完成前调用 SDK） ═══
+
+    // 监听 loginService 的 onDataSync 事件
+    _dataSyncSub = loginService.onDataSync.listen((detail) {
+      _log('数据同步事件: type=${detail.type}, state=${detail.state}');
+      if (detail.state == NIMDataSyncState.nimDataSyncStateCompleted) {
+        _log('数据同步完成（来自 loginService.onDataSync）');
+        _markDataSyncCompleted();
+      }
+    });
+
+    // 监听 conversationService 的 onSyncFinished 事件（双重保险）
+    try {
+      final convService = NimCore.instance.conversationService;
+      _convSyncFinishedSub = convService.onSyncFinished.listen((_) {
+        _log('会话同步完成（来自 conversationService.onSyncFinished）');
+        _markDataSyncCompleted();
+      });
+      _convSyncFailedSub = convService.onSyncFailed.listen((_) {
+        _log('会话同步失败（来自 conversationService.onSyncFailed）');
+        // 同步失败也标记为完成，避免永远卡住
+        _markDataSyncCompleted();
+      });
+    } catch (e) {
+      _log('注册会话同步监听失败（可能平台不支持）: $e');
+    }
   }
 
   // ═══════════════════════════════════════════════════════
   // 内部方法
   // ═══════════════════════════════════════════════════════
+
+  /// 标记数据同步完成
+  void _markDataSyncCompleted() {
+    if (!_isDataSyncCompleted) {
+      _isDataSyncCompleted = true;
+      _log('✅ 数据同步已完成，现在可以安全调用 SDK 查询接口');
+      _completeDataSync();
+      _dataSyncFinishedController.add(null);
+      notifyListeners();
+    }
+  }
+
+  /// 完成 Completer（安全调用，防止重复 complete）
+  void _completeDataSync() {
+    if (_dataSyncCompleter != null && !_dataSyncCompleter!.isCompleted) {
+      _dataSyncCompleter!.complete();
+    }
+  }
 
   void _updateStatus(IMConnectionStatus status) {
     if (_connectionStatus != status) {
@@ -312,8 +408,12 @@ class IMService extends ChangeNotifier {
     _loginFailedSub?.cancel();
     _kickedSub?.cancel();
     _connectStatusSub?.cancel();
+    _dataSyncSub?.cancel();
+    _convSyncFinishedSub?.cancel();
+    _convSyncFailedSub?.cancel();
     _statusController.close();
     _kickedController.close();
+    _dataSyncFinishedController.close();
     super.dispose();
   }
 }
