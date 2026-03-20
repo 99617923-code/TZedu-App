@@ -8,8 +8,10 @@
 /// 4. 将云信 NIMConversation 转换为业务模型
 ///
 /// 安全机制：
-/// - 所有 NIM SDK 调用前都检查 IM 初始化和登录状态
-/// - 防止 SDK 未初始化时原生层 abort() 导致闪退
+/// - macOS/Windows 桌面端：NIM PC SDK 的 ConversationService 存在原生层缺陷
+///   （构造函数注册 listener 时抛出 misuse，后续所有调用均会触发 C++ 异常导致 abort）
+///   因此在桌面端完全跳过 ConversationService 的原生调用，使用空列表
+/// - 移动端（iOS/Android）：正常调用 NIM SDK
 ///
 /// 使用方式：
 ///   final service = TZConversationService.instance;
@@ -19,6 +21,10 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:nim_core_v2/nim_core.dart';
 import 'im_service.dart';
+
+// 条件导入：用于平台检测
+import 'platform_check_stub.dart'
+    if (dart.library.io) 'platform_check_io.dart' as platformCheck;
 
 /// 业务会话模型（从云信 NIMConversation 转换而来）
 class TZConversation {
@@ -91,13 +97,19 @@ class TZConversationService extends ChangeNotifier {
   StreamSubscription<int>? _totalUnreadSub;
 
   // ═══════════════════════════════════════════════════════
-  // 安全检查
+  // 平台安全检查
   // ═══════════════════════════════════════════════════════
 
+  /// 检查当前平台是否为桌面端（macOS/Windows/Linux）
+  /// NIM PC SDK 的 ConversationService 在桌面端存在原生层缺陷，必须跳过
+  bool get _isDesktopPlatform {
+    if (kIsWeb) return false;
+    return platformCheck.isDesktopPlatform();
+  }
+
   /// 检查 IM SDK 是否已初始化、已登录且数据同步完成
-  /// 这是防止原生层 abort() 的关键守卫
-  /// NIM PC SDK（macOS/Windows）要求数据同步完成后才能查询会话列表
   bool get _isIMReady =>
+      !_isDesktopPlatform &&
       IMService.instance.isInitialized &&
       IMService.instance.isLoggedIn &&
       IMService.instance.isDataSyncCompleted;
@@ -106,9 +118,16 @@ class TZConversationService extends ChangeNotifier {
   // 初始化与监听
   // ═══════════════════════════════════════════════════════
 
-  /// 初始化会话服务（在 IM 登录且数据同步完成后调用）
-  /// 会先等待数据同步完成，再加载会话列表
+  /// 初始化会话服务
   Future<void> initialize() async {
+    // 桌面端：完全跳过 ConversationService 的原生调用
+    if (_isDesktopPlatform) {
+      _log('桌面端平台，跳过 ConversationService 原生调用（NIM PC SDK 不支持）');
+      _isLoading = false;
+      notifyListeners();
+      return;
+    }
+
     final imService = IMService.instance;
 
     if (!imService.isInitialized || !imService.isLoggedIn) {
@@ -116,8 +135,7 @@ class TZConversationService extends ChangeNotifier {
       return;
     }
 
-    // 关键：等待数据同步完成后再查询会话列表
-    // NIM PC SDK 在同步完成前调用 getConversationList 会导致原生层 abort()
+    // 等待数据同步完成后再查询会话列表
     _log('等待 IM 数据同步完成...');
     final syncOk = await imService.waitForDataSync(timeout: const Duration(seconds: 15));
     if (!syncOk) {
@@ -134,6 +152,7 @@ class TZConversationService extends ChangeNotifier {
   /// 注册会话变化监听（使用 Stream 方式）
   void _setupListeners() {
     if (_listenerRegistered) return;
+    if (_isDesktopPlatform) return;
     if (!_isIMReady) return;
 
     _listenerRegistered = true;
@@ -179,7 +198,10 @@ class TZConversationService extends ChangeNotifier {
 
   /// 加载会话列表
   Future<void> loadConversations() async {
-    // 关键守卫：IM 未就绪时不调用 NIM SDK
+    if (_isDesktopPlatform) {
+      _log('桌面端平台，跳过 getConversationList 调用');
+      return;
+    }
     if (!_isIMReady) {
       _log('IM 未就绪，跳过加载会话列表');
       return;
@@ -212,7 +234,7 @@ class TZConversationService extends ChangeNotifier {
 
   /// 置顶/取消置顶会话
   Future<bool> toggleStickTop(String conversationId) async {
-    if (!_isIMReady) return false;
+    if (_isDesktopPlatform || !_isIMReady) return false;
 
     try {
       final conv = _conversations.firstWhere(
@@ -236,7 +258,7 @@ class TZConversationService extends ChangeNotifier {
 
   /// 删除会话
   Future<bool> deleteConversation(String conversationId) async {
-    if (!_isIMReady) return false;
+    if (_isDesktopPlatform || !_isIMReady) return false;
 
     try {
       final result = await NimCore.instance.conversationService
@@ -257,7 +279,7 @@ class TZConversationService extends ChangeNotifier {
 
   /// 标记会话已读
   Future<void> markConversationRead(String conversationId) async {
-    if (!_isIMReady) return;
+    if (_isDesktopPlatform || !_isIMReady) return;
 
     try {
       await NimCore.instance.conversationService
@@ -387,7 +409,7 @@ class TZConversationService extends ChangeNotifier {
 
   /// 刷新总未读数
   Future<void> _refreshTotalUnread() async {
-    if (!_isIMReady) return;
+    if (_isDesktopPlatform || !_isIMReady) return;
 
     try {
       final result =

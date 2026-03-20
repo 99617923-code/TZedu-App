@@ -9,6 +9,11 @@
 /// 5. 数据同步状态管理（防止同步完成前调用 SDK 导致原生层崩溃）
 /// 6. 全局单例，供各页面调用
 ///
+/// 安全机制：
+/// - macOS/Windows 桌面端：NIM PC SDK 的 ConversationService 存在原生层缺陷
+///   不注册 conversationService 的 onSyncFinished/onSyncFailed 监听
+///   避免触发 C++ 异常导致 abort
+///
 /// 使用方式：
 ///   await IMService.instance.ensureInitialized(); // 延迟初始化
 ///   await IMService.instance.login(accid, token);
@@ -25,6 +30,10 @@ import '../config/im_config.dart';
 // 条件导入：Web 端不支持 dart:io
 import 'platform_helper_stub.dart'
     if (dart.library.io) 'platform_helper_io.dart' as platform;
+
+// 条件导入：平台检测
+import 'platform_check_stub.dart'
+    if (dart.library.io) 'platform_check_io.dart' as platformCheck;
 
 /// IM 连接状态枚举
 enum IMConnectionStatus {
@@ -67,6 +76,16 @@ class IMService extends ChangeNotifier {
   String? get initError => _initError;
 
   // ═══════════════════════════════════════════════════════
+  // 平台检测
+  // ═══════════════════════════════════════════════════════
+
+  /// 检查当前平台是否为桌面端
+  bool get _isDesktopPlatform {
+    if (kIsWeb) return false;
+    return platformCheck.isDesktopPlatform();
+  }
+
+  // ═══════════════════════════════════════════════════════
   // 数据同步状态（关键：防止同步完成前调用 SDK 导致崩溃）
   // ═══════════════════════════════════════════════════════
 
@@ -88,7 +107,6 @@ class IMService extends ChangeNotifier {
       return _isDataSyncCompleted;
     } on TimeoutException {
       _log('等待数据同步超时（${timeout.inSeconds}s），强制标记为完成');
-      // 超时后也标记为完成，避免永远卡住
       _isDataSyncCompleted = true;
       notifyListeners();
       return true;
@@ -124,11 +142,9 @@ class IMService extends ChangeNotifier {
   // ═══════════════════════════════════════════════════════
 
   /// 确保 SDK 已初始化（延迟加载，首次调用时才初始化）
-  /// 在进入聊天页面或登录成功后调用
   Future<bool> ensureInitialized() async {
     if (_isInitialized) return true;
     if (_isInitializing) {
-      // 等待正在进行的初始化完成
       while (_isInitializing) {
         await Future.delayed(const Duration(milliseconds: 100));
       }
@@ -210,10 +226,7 @@ class IMService extends ChangeNotifier {
   // ═══════════════════════════════════════════════════════
 
   /// 登录 IM
-  /// [accid] 网易云信账号 ID（由后端在用户登录时返回）
-  /// [token] IM Token（由后端在用户登录时返回）
   Future<bool> login(String accid, String token) async {
-    // 确保 SDK 已初始化
     final initialized = await ensureInitialized();
     if (!initialized) {
       _log('SDK 未初始化，无法登录');
@@ -244,7 +257,6 @@ class IMService extends ChangeNotifier {
       } else {
         _updateStatus(IMConnectionStatus.disconnected);
         _log('IM 登录失败: ${result.errorDetails}');
-        // 登录失败也完成 Completer，避免永远等待
         _completeDataSync();
         return false;
       }
@@ -348,20 +360,28 @@ class IMService extends ChangeNotifier {
       }
     });
 
-    // 监听 conversationService 的 onSyncFinished 事件（双重保险）
-    try {
-      final convService = NimCore.instance.conversationService;
-      _convSyncFinishedSub = convService.onSyncFinished.listen((_) {
-        _log('会话同步完成（来自 conversationService.onSyncFinished）');
-        _markDataSyncCompleted();
-      });
-      _convSyncFailedSub = convService.onSyncFailed.listen((_) {
-        _log('会话同步失败（来自 conversationService.onSyncFailed）');
-        // 同步失败也标记为完成，避免永远卡住
-        _markDataSyncCompleted();
-      });
-    } catch (e) {
-      _log('注册会话同步监听失败（可能平台不支持）: $e');
+    // ═══ 关键修复：桌面端不注册 conversationService 监听 ═══
+    // NIM PC SDK (macOS/Windows) 的 FLTConversationService 构造函数中
+    // 注册 listener 时会抛出 std::runtime_error: misuse
+    // 虽然构造函数有 try-catch，但后续对 conversationService 的任何调用
+    // 都会触发未被 catch 的 C++ 异常导致 abort()
+    // 因此在桌面端完全不接触 conversationService
+    if (!_isDesktopPlatform) {
+      try {
+        final convService = NimCore.instance.conversationService;
+        _convSyncFinishedSub = convService.onSyncFinished.listen((_) {
+          _log('会话同步完成（来自 conversationService.onSyncFinished）');
+          _markDataSyncCompleted();
+        });
+        _convSyncFailedSub = convService.onSyncFailed.listen((_) {
+          _log('会话同步失败（来自 conversationService.onSyncFailed）');
+          _markDataSyncCompleted();
+        });
+      } catch (e) {
+        _log('注册会话同步监听失败（可能平台不支持）: $e');
+      }
+    } else {
+      _log('桌面端平台，跳过 conversationService 监听注册（NIM PC SDK 不支持）');
     }
   }
 
