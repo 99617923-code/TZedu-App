@@ -51,3 +51,7 @@ app.*.map.json
 **/macos/.symlinks/
 **/windows/flutter/ephemeral/
 pubspec.lock
+
+# 开发脚本运行时文件
+.dev_pids/
+.dev_logs/
