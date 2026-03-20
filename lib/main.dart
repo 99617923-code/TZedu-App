@@ -14,6 +14,8 @@ import 'services/auth_service.dart';
 import 'services/conversation_service.dart';
 import 'services/chat_message_service.dart';
 import 'services/user_info_service.dart';
+import 'services/test_service.dart';
+import 'services/device_service.dart';
 
 /// 自定义 ScrollBehavior，确保所有平台（含 iOS/Web）都能正常滚动
 class TZScrollBehavior extends MaterialScrollBehavior {
@@ -57,6 +59,7 @@ class TZIeltsApp extends StatelessWidget {
         ChangeNotifierProvider.value(value: TZConversationService.instance),
         ChangeNotifierProvider.value(value: ChatMessageService.instance),
         ChangeNotifierProvider.value(value: UserInfoService.instance),
+        ChangeNotifierProvider.value(value: TestService.instance),
       ],
       child: MaterialApp(
         title: '途正英语',

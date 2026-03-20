@@ -9,6 +9,9 @@ import '../../config/theme.dart';
 import '../../utils/responsive.dart';
 import '../../services/auth_service.dart';
 import '../../services/im_service.dart';
+import 'edit_profile_page.dart';
+import '../test/test_page.dart';
+import '../test/test_history_page.dart';
 
 class ProfilePage extends StatelessWidget {
   final VoidCallback? onLogout;
@@ -225,8 +228,8 @@ class ProfilePage extends StatelessWidget {
           // 编辑按钮
           IconButton(
             onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('编辑资料功能即将开放'), duration: Duration(seconds: 2)),
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const EditProfilePage()),
               );
             },
             icon: const Icon(Icons.edit_outlined, color: TZColors.primaryPurple, size: 20),
@@ -286,6 +289,12 @@ class ProfilePage extends StatelessWidget {
 
   Widget _buildMenuSection(BuildContext context) {
     final menuItems = [
+      _MenuItem(icon: Icons.psychology_outlined, title: 'AI 分级测评', subtitle: '智能评估英语水平', onTap: () {
+        Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TestPage()));
+      }),
+      _MenuItem(icon: Icons.history, title: '测评历史', subtitle: '查看历史测评记录', onTap: () {
+        Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TestHistoryPage()));
+      }),
       _MenuItem(icon: Icons.notifications_outlined, title: '消息通知', subtitle: '管理推送和免打扰'),
       _MenuItem(icon: Icons.security_outlined, title: '账号安全', subtitle: '密码、绑定手机'),
       _MenuItem(icon: Icons.storage_outlined, title: '存储管理', subtitle: '清理缓存数据'),
@@ -323,7 +332,7 @@ class ProfilePage extends StatelessWidget {
                 title: Text(item.title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: TZColors.textDark)),
                 subtitle: Text(item.subtitle, style: const TextStyle(fontSize: 12, color: TZColors.textGray)),
                 trailing: const Icon(Icons.chevron_right, color: TZColors.textLight, size: 20),
-                onTap: () {
+                onTap: item.onTap ?? () {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text('${item.title}功能即将开放'), duration: const Duration(seconds: 2)),
                   );
@@ -461,5 +470,6 @@ class _MenuItem {
   final IconData icon;
   final String title;
   final String subtitle;
-  const _MenuItem({required this.icon, required this.title, required this.subtitle});
+  final VoidCallback? onTap;
+  const _MenuItem({required this.icon, required this.title, required this.subtitle, this.onTap});
 }

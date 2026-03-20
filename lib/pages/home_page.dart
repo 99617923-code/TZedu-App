@@ -17,6 +17,8 @@ import '../widgets/role_switcher.dart';
 import '../widgets/hero_banner.dart';
 import '../services/update_service.dart';
 import '../utils/responsive.dart';
+import 'test/test_page.dart';
+import 'test/test_history_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -325,6 +327,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                                 bgColor: const Color(0xFFF9FAFB),
                                 borderColor: const Color(0xFFF3F4F6),
                                 onTap: () => _showFeatureComingSoon('管理后台'),
+                              ),
+                              const SizedBox(width: 12),
+                              _buildBottomButton(
+                                icon: Icons.psychology_outlined,
+                                label: 'AI 测评',
+                                color: const Color(0xFF7C3AED),
+                                bgColor: const Color(0xFFF5F3FF),
+                                borderColor: const Color(0xFFEDE9FE),
+                                onTap: () {
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute(builder: (_) => const TestPage()),
+                                  );
+                                },
                               ),
                               const SizedBox(width: 12),
                               _buildBottomButton(

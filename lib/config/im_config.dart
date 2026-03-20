@@ -80,6 +80,9 @@ class IMConfig {
   /// 更新推送 Token
   static const String devicePushTokenPath = '/api/v1/device/push-token';
 
+  /// 设备下线
+  static const String deviceOfflinePath = '/api/v1/device/offline';
+
   // ═══════════════════════════════════════════════════════
   // AI 测评接口
   // ═══════════════════════════════════════════════════════
@@ -96,7 +99,16 @@ class IMConfig {
   /// 测评历史
   static const String testHistoryPath = '/api/v1/test/history';
 
-  /// 文本转语音
+  /// 上传测评录音
+  static const String testUploadAudioPath = '/api/v1/test/upload-audio';
+
+  /// 语音转文字 (ASR)
+  static const String testTranscribePath = '/api/v1/test/transcribe';
+
+  /// 终止测评会话
+  static const String testTerminatePath = '/api/v1/test/terminate';
+
+  /// 文本转语音 (TTS)
   static const String testTtsPath = '/api/v1/test/tts';
 
   // ═══════════════════════════════════════════════════════
