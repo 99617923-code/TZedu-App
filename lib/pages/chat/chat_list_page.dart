@@ -131,6 +131,178 @@ class _ChatListPageState extends State<ChatListPage> {
     }
   }
 
+  // ═══════════════════════════════════════════════════════
+  // 发起新聊天
+  // ═══════════════════════════════════════════════════════
+
+  /// 显示发起新聊天对话框
+  void _showNewChatDialog() {
+    final imService = context.read<IMService>();
+    if (!imService.isLoggedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('IM 未连接，请先登录'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    final accidController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.chat_bubble_outline, color: Color(0xFF7C3AED), size: 24),
+            SizedBox(width: 8),
+            Text(
+              '发起新聊天',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1A1A2E),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '输入对方的 IM 账号（accid）即可直接发起私聊',
+              style: TextStyle(
+                fontSize: 13,
+                color: Color(0xFF6B7280),
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: accidController,
+              autofocus: true,
+              decoration: InputDecoration(
+                hintText: '例如: tz_user_123',
+                hintStyle: const TextStyle(color: Color(0xFFD1D5DB)),
+                prefixIcon: const Icon(Icons.person_search, color: Color(0xFF7C3AED)),
+                filled: true,
+                fillColor: const Color(0xFFF9FAFB),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFF7C3AED), width: 2),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              ),
+              onSubmitted: (value) {
+                if (value.trim().isNotEmpty) {
+                  Navigator.of(ctx).pop();
+                  _startP2PChat(value.trim());
+                }
+              },
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '当前账号: ${imService.currentAccid ?? "未知"}',
+              style: const TextStyle(
+                fontSize: 11,
+                color: Color(0xFF9CA3AF),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text(
+              '取消',
+              style: TextStyle(color: Color(0xFF6B7280)),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final accid = accidController.text.trim();
+              if (accid.isNotEmpty) {
+                Navigator.of(ctx).pop();
+                _startP2PChat(accid);
+              }
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF7C3AED),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            ),
+            child: const Text('开始聊天', style: TextStyle(fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 通过 accid 发起 P2P 聊天
+  Future<void> _startP2PChat(String targetAccid) async {
+    try {
+      // 使用 NIM SDK 的 ConversationIdUtil 生成 P2P 会话ID
+      final result = await NimCore.instance.conversationIdUtil
+          .p2pConversationId(targetAccid);
+
+      if (!result.isSuccess || result.data == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('创建会话失败: ${result.errorDetails ?? "未知错误"}'),
+              backgroundColor: const Color(0xFFEF4444),
+            ),
+          );
+        }
+        return;
+      }
+
+      final conversationId = result.data!;
+      debugPrint('[ChatListPage] 发起 P2P 聊天: $targetAccid -> $conversationId');
+
+      if (!mounted) return;
+
+      final isDesktop = Responsive.isDesktop(context);
+
+      if (isDesktop) {
+        // 桌面端：直接在右侧面板打开
+        setState(() {
+          _selectedConversationId = conversationId;
+          _selectedChatId = null;
+        });
+      } else {
+        // 移动端：跳转到聊天室页面
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => ChatRoomPage(
+              conversationId: conversationId,
+              conversationName: targetAccid,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[ChatListPage] 发起聊天异常: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('发起聊天失败: $e'),
+            backgroundColor: const Color(0xFFEF4444),
+          ),
+        );
+      }
+    }
+  }
+
   @override
   void dispose() {
     _searchController.dispose();
@@ -306,7 +478,7 @@ class _ChatListPageState extends State<ChatListPage> {
                 icon: Icons.add,
                 color: TZColors.primaryPurple,
                 bgColor: const Color(0xFFF5F3FF),
-                onTap: () {},
+                onTap: () => _showNewChatDialog(),
               ),
             ],
           ),
