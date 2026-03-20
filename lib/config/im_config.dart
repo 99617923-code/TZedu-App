@@ -67,6 +67,9 @@ class IMConfig {
   /// 更新用户资料
   static const String updateProfilePath = '/api/v1/user/profile';
 
+  /// 通过手机号搜索用户
+  static const String searchUserByPhonePath = '/api/v1/user/search-by-phone';
+
   // ═══════════════════════════════════════════════════════
   // 设备管理接口
   // ═══════════════════════════════════════════════════════

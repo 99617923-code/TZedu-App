@@ -14,6 +14,7 @@ import '../../config/theme.dart';
 import '../../models/chat_data.dart';
 import '../../utils/responsive.dart';
 import '../../services/im_service.dart';
+import '../../services/auth_service.dart';
 import '../../services/conversation_service.dart';
 import 'chat_panel.dart';
 import 'chat_panel_im.dart';
@@ -135,120 +136,29 @@ class _ChatListPageState extends State<ChatListPage> {
   // 发起新聊天
   // ═══════════════════════════════════════════════════════
 
-  /// 显示发起新聊天对话框
+  /// 显示发起新聊天对话框（通过手机号搜索用户）
   void _showNewChatDialog() {
-    final imService = context.read<IMService>();
-    if (!imService.isLoggedIn) {
+    final authService = context.read<AuthService>();
+    if (!authService.isLoggedIn) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('IM 未连接，请先登录'),
+          content: Text('请先登录'),
           backgroundColor: Color(0xFFEF4444),
         ),
       );
       return;
     }
 
-    final accidController = TextEditingController();
-
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Row(
-          children: [
-            Icon(Icons.chat_bubble_outline, color: Color(0xFF7C3AED), size: 24),
-            SizedBox(width: 8),
-            Text(
-              '发起新聊天',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w700,
-                color: Color(0xFF1A1A2E),
-              ),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '输入对方的 IM 账号（accid）即可直接发起私聊',
-              style: TextStyle(
-                fontSize: 13,
-                color: Color(0xFF6B7280),
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: accidController,
-              autofocus: true,
-              decoration: InputDecoration(
-                hintText: '例如: tz_user_123',
-                hintStyle: const TextStyle(color: Color(0xFFD1D5DB)),
-                prefixIcon: const Icon(Icons.person_search, color: Color(0xFF7C3AED)),
-                filled: true,
-                fillColor: const Color(0xFFF9FAFB),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: Color(0xFF7C3AED), width: 2),
-                ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              ),
-              onSubmitted: (value) {
-                if (value.trim().isNotEmpty) {
-                  Navigator.of(ctx).pop();
-                  _startP2PChat(value.trim());
-                }
-              },
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '当前账号: ${imService.currentAccid ?? "未知"}',
-              style: const TextStyle(
-                fontSize: 11,
-                color: Color(0xFF9CA3AF),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text(
-              '取消',
-              style: TextStyle(color: Color(0xFF6B7280)),
-            ),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final accid = accidController.text.trim();
-              if (accid.isNotEmpty) {
-                Navigator.of(ctx).pop();
-                _startP2PChat(accid);
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF7C3AED),
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            ),
-            child: const Text('开始聊天', style: TextStyle(fontWeight: FontWeight.w600)),
-          ),
-        ],
+      builder: (ctx) => _NewChatDialog(
+        onStartChat: (accid, nickname) => _startP2PChat(accid, nickname),
       ),
     );
   }
 
   /// 通过 accid 发起 P2P 聊天
-  Future<void> _startP2PChat(String targetAccid) async {
+  Future<void> _startP2PChat(String targetAccid, String displayName) async {
     try {
       // 使用 NIM SDK 的 ConversationIdUtil 生成 P2P 会话ID
       final result = await NimCore.instance.conversationIdUtil
@@ -274,18 +184,16 @@ class _ChatListPageState extends State<ChatListPage> {
       final isDesktop = Responsive.isDesktop(context);
 
       if (isDesktop) {
-        // 桌面端：直接在右侧面板打开
         setState(() {
           _selectedConversationId = conversationId;
           _selectedChatId = null;
         });
       } else {
-        // 移动端：跳转到聊天室页面
         Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => ChatRoomPage(
               conversationId: conversationId,
-              conversationName: targetAccid,
+              conversationName: displayName,
             ),
           ),
         );
@@ -882,6 +790,349 @@ class _ChatListPageState extends State<ChatListPage> {
         ),
         child: Icon(icon, color: color, size: 18),
       ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 发起新聊天对话框（手机号搜索用户）
+// ═══════════════════════════════════════════════════════════════
+
+class _NewChatDialog extends StatefulWidget {
+  final void Function(String accid, String nickname) onStartChat;
+
+  const _NewChatDialog({required this.onStartChat});
+
+  @override
+  State<_NewChatDialog> createState() => _NewChatDialogState();
+}
+
+class _NewChatDialogState extends State<_NewChatDialog> {
+  final _phoneController = TextEditingController();
+  bool _isSearching = false;
+  SearchedUser? _foundUser;
+  String? _errorMessage;
+
+  @override
+  void dispose() {
+    _phoneController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _searchUser() async {
+    final phone = _phoneController.text.trim();
+    if (phone.isEmpty) {
+      setState(() => _errorMessage = '请输入手机号');
+      return;
+    }
+
+    // 简单的手机号格式验证
+    if (!RegExp(r'^1\d{10}$').hasMatch(phone)) {
+      setState(() => _errorMessage = '请输入正确的11位手机号');
+      return;
+    }
+
+    setState(() {
+      _isSearching = true;
+      _errorMessage = null;
+      _foundUser = null;
+    });
+
+    try {
+      final result = await AuthService.instance.searchUserByPhone(phone);
+
+      if (!mounted) return;
+
+      if (result.success && result.user != null) {
+        setState(() {
+          _foundUser = result.user;
+          _isSearching = false;
+        });
+      } else {
+        setState(() {
+          _errorMessage = result.message ?? '未找到该用户';
+          _isSearching = false;
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = '搜索失败: $e';
+        _isSearching = false;
+      });
+    }
+  }
+
+  void _confirmStartChat() {
+    if (_foundUser == null || _foundUser!.accid.isEmpty) {
+      setState(() => _errorMessage = '该用户暂无 IM 账号，无法发起聊天');
+      return;
+    }
+
+    Navigator.of(context).pop();
+    widget.onStartChat(_foundUser!.accid, _foundUser!.nickname);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      title: const Row(
+        children: [
+          Icon(Icons.person_add_alt_1, color: Color(0xFF7C3AED), size: 24),
+          SizedBox(width: 8),
+          Text(
+            '发起新聊天',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF1A1A2E),
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 340,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '输入对方手机号搜索用户，找到后即可发起私聊',
+              style: TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
+            ),
+            const SizedBox(height: 16),
+
+            // 手机号输入 + 搜索按钮
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _phoneController,
+                    autofocus: true,
+                    keyboardType: TextInputType.phone,
+                    maxLength: 11,
+                    decoration: InputDecoration(
+                      hintText: '请输入手机号',
+                      hintStyle: const TextStyle(color: Color(0xFFD1D5DB)),
+                      prefixIcon: const Icon(Icons.phone_android, color: Color(0xFF7C3AED)),
+                      counterText: '',
+                      filled: true,
+                      fillColor: const Color(0xFFF9FAFB),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: Color(0xFF7C3AED), width: 2),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    ),
+                    onSubmitted: (_) => _searchUser(),
+                    onChanged: (_) {
+                      // 清除之前的搜索结果
+                      if (_foundUser != null || _errorMessage != null) {
+                        setState(() {
+                          _foundUser = null;
+                          _errorMessage = null;
+                        });
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  height: 48,
+                  child: ElevatedButton(
+                    onPressed: _isSearching ? null : _searchUser,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF7C3AED),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                    ),
+                    child: _isSearching
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text('搜索', style: TextStyle(fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ],
+            ),
+
+            // 错误提示
+            if (_errorMessage != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF2F2),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, size: 16, color: Color(0xFFEF4444)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _errorMessage!,
+                        style: const TextStyle(fontSize: 12, color: Color(0xFFEF4444)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
+            // 搜索结果 - 用户卡片
+            if (_foundUser != null) ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF5F3FF),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFFDDD6FE)),
+                ),
+                child: Row(
+                  children: [
+                    // 头像
+                    Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFDBEAFE),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: _foundUser!.avatar.isNotEmpty
+                          ? ClipRRect(
+                              borderRadius: BorderRadius.circular(14),
+                              child: Image.network(
+                                _foundUser!.avatar,
+                                width: 48,
+                                height: 48,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => Center(
+                                  child: Text(
+                                    _foundUser!.nickname.isNotEmpty
+                                        ? _foundUser!.nickname[0]
+                                        : '?',
+                                    style: const TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF3B82F6),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            )
+                          : Center(
+                              child: Text(
+                                _foundUser!.nickname.isNotEmpty
+                                    ? _foundUser!.nickname[0]
+                                    : '?',
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                  color: Color(0xFF3B82F6),
+                                ),
+                              ),
+                            ),
+                    ),
+                    const SizedBox(width: 12),
+                    // 用户信息
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  _foundUser!.nickname.isNotEmpty
+                                      ? _foundUser!.nickname
+                                      : '未设置昵称',
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF1A1A2E),
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFDDD6FE),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  _foundUser!.roleLabel,
+                                  style: const TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF7C3AED),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _foundUser!.phone.isNotEmpty
+                                ? '${_foundUser!.phone.substring(0, 3)}****${_foundUser!.phone.substring(7)}'
+                                : '',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF9CA3AF),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    // 发起聊天按钮
+                    const Icon(Icons.check_circle, color: Color(0xFF10B981), size: 24),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text(
+            '取消',
+            style: TextStyle(color: Color(0xFF6B7280)),
+          ),
+        ),
+        if (_foundUser != null)
+          ElevatedButton.icon(
+            onPressed: _confirmStartChat,
+            icon: const Icon(Icons.chat, size: 16),
+            label: const Text('发起聊天', style: TextStyle(fontWeight: FontWeight.w600)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF7C3AED),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            ),
+          ),
+      ],
     );
   }
 }

@@ -74,6 +74,44 @@ class UserProfile {
   };
 }
 
+/// 搜索用户结果
+class SearchUserResult {
+  final bool success;
+  final String? message;
+  final SearchedUser? user;
+
+  SearchUserResult({required this.success, this.message, this.user});
+}
+
+/// 搜索到的用户信息
+class SearchedUser {
+  final String userId;
+  final String nickname;
+  final String avatar;
+  final String phone;
+  final String role;
+  final String accid; // IM 账号
+
+  SearchedUser({
+    required this.userId,
+    required this.nickname,
+    required this.avatar,
+    required this.phone,
+    required this.role,
+    required this.accid,
+  });
+
+  /// 角色显示名称
+  String get roleLabel {
+    switch (role) {
+      case 'teacher': return '老师';
+      case 'parent': return '家长';
+      case 'admin': return '管理员';
+      default: return '学生';
+    }
+  }
+}
+
 class AuthService extends ChangeNotifier {
   // ═══════════════════════════════════════════════════════
   // 单例
@@ -500,6 +538,55 @@ class AuthService extends ChangeNotifier {
     } catch (e) {
       _log('更新资料异常: $e');
       return false;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 搜索用户
+  // ═══════════════════════════════════════════════════════
+
+  /// 通过手机号搜索用户
+  /// 返回用户信息（包含 accid），找不到返回 null
+  Future<SearchUserResult> searchUserByPhone(String phone) async {
+    if (_bizToken == null) {
+      return SearchUserResult(success: false, message: '未登录，请先登录');
+    }
+
+    try {
+      _log('搜索用户: $phone');
+
+      final response = await http.post(
+        Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.searchUserByPhonePath}'),
+        headers: IMConfig.authHeaders(_bizToken!),
+        body: jsonEncode({'phone': phone}),
+      );
+
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      final code = body['code'] as int?;
+
+      if (code == 200 && body['data'] != null) {
+        final data = body['data'] as Map<String, dynamic>;
+        return SearchUserResult(
+          success: true,
+          message: '找到用户',
+          user: SearchedUser(
+            userId: data['user_id']?.toString() ?? '',
+            nickname: data['nickname']?.toString() ?? '',
+            avatar: data['avatar']?.toString() ?? '',
+            phone: data['phone']?.toString() ?? '',
+            role: data['role']?.toString() ?? 'student',
+            accid: data['accid']?.toString() ?? '',
+          ),
+        );
+      } else {
+        return SearchUserResult(
+          success: false,
+          message: body['msg']?.toString() ?? '未找到该用户',
+        );
+      }
+    } catch (e) {
+      _log('搜索用户异常: $e');
+      return SearchUserResult(success: false, message: '网络异常: $e');
     }
   }
 
