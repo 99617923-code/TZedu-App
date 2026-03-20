@@ -41,6 +41,8 @@ class LauncherViewModel: ObservableObject {
     private var processes: [String: Process] = [:]
     private var syncTimer: Timer?
     private var projectPath: String = ""
+    private var shellEnv: [String: String] = [:]
+    private var flutterPath: String = ""
     
     enum DeviceStatus: String {
         case stopped = "未启动"
@@ -59,7 +61,54 @@ class LauncherViewModel: ObservableObject {
     }
     
     init() {
+        detectFlutterPath()
         detectProjectPath()
+    }
+    
+    private func detectFlutterPath() {
+        // 从 login shell 获取完整的 PATH
+        let proc = Process()
+        let pipe = Pipe()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-l", "-c", "echo $PATH"]
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        // 不设置 environment，让 bash -l 自行加载
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let fullPath = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !fullPath.isEmpty {
+                shellEnv = ProcessInfo.processInfo.environment
+                shellEnv["PATH"] = fullPath
+                addLog("Shell PATH 已加载", type: .info)
+            }
+        } catch {
+            addLog("无法获取 Shell PATH: \(error.localizedDescription)", type: .warning)
+        }
+        
+        // 检测 flutter 路径
+        let flutterProc = Process()
+        let flutterPipe = Pipe()
+        flutterProc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        flutterProc.arguments = ["-l", "-c", "which flutter"]
+        flutterProc.standardOutput = flutterPipe
+        flutterProc.standardError = flutterPipe
+        do {
+            try flutterProc.run()
+            flutterProc.waitUntilExit()
+            let data = flutterPipe.fileHandleForReading.readDataToEndOfFile()
+            flutterPath = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "flutter"
+            if !flutterPath.isEmpty && flutterProc.terminationStatus == 0 {
+                addLog("Flutter 路径: \(flutterPath)", type: .info)
+            } else {
+                flutterPath = "flutter"
+                addLog("未检测到 Flutter，将使用默认路径", type: .warning)
+            }
+        } catch {
+            flutterPath = "flutter"
+        }
     }
     
     private func detectProjectPath() {
@@ -213,7 +262,9 @@ class LauncherViewModel: ObservableObject {
         process.standardOutput = pipe
         process.standardError = pipe
         process.standardInput = inputPipe
-        process.environment = ProcessInfo.processInfo.environment
+        if !self.shellEnv.isEmpty {
+            process.environment = self.shellEnv
+        }
         
         processes[platform] = process
         
@@ -356,6 +407,7 @@ class LauncherViewModel: ObservableObject {
     
     // MARK: - Shell Helper
     private func runShell(_ command: String, completion: @escaping (String, Bool) -> Void) {
+        let env = self.shellEnv
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             let pipe = Pipe()
@@ -364,7 +416,9 @@ class LauncherViewModel: ObservableObject {
             process.arguments = ["-l", "-c", command]
             process.standardOutput = pipe
             process.standardError = pipe
-            process.environment = ProcessInfo.processInfo.environment
+            if !env.isEmpty {
+                process.environment = env
+            }
             
             do {
                 try process.run()
