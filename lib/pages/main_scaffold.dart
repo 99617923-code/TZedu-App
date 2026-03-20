@@ -12,6 +12,8 @@ import '../utils/responsive.dart';
 import '../services/conversation_service.dart';
 import 'home_page.dart';
 import 'chat/chat_list_page.dart';
+import 'profile/profile_page.dart';
+import '../services/auth_service.dart';
 
 // ═══════════════════════════════════════════════════════
 // 占位页面
@@ -78,13 +80,13 @@ class MainScaffold extends StatefulWidget {
 class _MainScaffoldState extends State<MainScaffold> {
   int _currentIndex = 0;
 
-  // Tab 页面
-  final List<Widget> _pages = [
+  // Tab 页面（"我的"页使用真实 ProfilePage）
+  late final List<Widget> _pages = [
     const ChatListPage(),
     const HomePage(),
     const _PlaceholderPage(title: '课程商城', icon: Icons.shopping_bag_outlined, color: TZColors.primaryPurple),
     const _PlaceholderPage(title: '直播课堂', icon: Icons.videocam_outlined, color: Color(0xFFEF4444)),
-    const _PlaceholderPage(title: '我的', icon: Icons.person_outline, color: TZColors.blue),
+    const ProfilePage(),
   ];
 
   @override
@@ -129,32 +131,8 @@ class _MainScaffoldState extends State<MainScaffold> {
       child: Column(
         children: [
           const SizedBox(height: 16),
-          // 用户头像
-          GestureDetector(
-            onTap: () => setState(() => _currentIndex = 4),
-            child: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [Color(0xFF7C3AED), Color(0xFFA855F7)],
-                ),
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF7C3AED).withOpacity(0.3),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-              child: const Center(
-                child: Text('张', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700)),
-              ),
-            ),
-          ),
+          // 用户头像（从 AuthService 获取真实用户信息）
+          _buildDesktopAvatar(),
           const SizedBox(height: 24),
           // 首页按钮
           _buildSideNavItem(
@@ -195,6 +173,40 @@ class _MainScaffoldState extends State<MainScaffold> {
           ),
           const SizedBox(height: 16),
         ],
+      ),
+    );
+  }
+
+  Widget _buildDesktopAvatar() {
+    final auth = context.watch<AuthService>();
+    final user = auth.currentUser;
+    final initial = (user != null && user.nickname.isNotEmpty)
+        ? user.nickname[0]
+        : '?';
+
+    return GestureDetector(
+      onTap: () => setState(() => _currentIndex = 4),
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF7C3AED), Color(0xFFA855F7)],
+          ),
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF7C3AED).withOpacity(0.3),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Center(
+          child: Text(initial, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700)),
+        ),
       ),
     );
   }

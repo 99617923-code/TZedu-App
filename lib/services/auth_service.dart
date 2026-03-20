@@ -2,7 +2,7 @@
 /// 火鹰科技出品
 ///
 /// 职责：
-/// 1. 调用自建后端的登录 API
+/// 1. 调用自建后端的登录/注册/验证码 API
 /// 2. 获取业务 Token + IM Token + AppKey
 /// 3. 自动登录网易云信 IM
 /// 4. Token 持久化存储
@@ -39,6 +39,7 @@ class UserProfile {
   final String role; // student / teacher / parent
   final String? phone;
   final String? email;
+  final String? status;
 
   UserProfile({
     required this.userId,
@@ -47,6 +48,7 @@ class UserProfile {
     required this.role,
     this.phone,
     this.email,
+    this.status,
   });
 
   factory UserProfile.fromJson(Map<String, dynamic> json) {
@@ -57,6 +59,7 @@ class UserProfile {
       role: json['role'] ?? 'student',
       phone: json['phone'],
       email: json['email'],
+      status: json['status'],
     );
   }
 
@@ -67,6 +70,7 @@ class UserProfile {
     'role': role,
     'phone': phone,
     'email': email,
+    'status': status,
   };
 }
 
@@ -106,48 +110,132 @@ class AuthService extends ChangeNotifier {
   static const String _keyUserProfile = 'tz_user_profile';
 
   // ═══════════════════════════════════════════════════════
+  // 图形验证码
+  // ═══════════════════════════════════════════════════════
+
+  /// 获取图形验证码
+  /// 返回 { captchaId: String, captchaImage: String(base64 SVG) }
+  Future<Map<String, dynamic>?> getCaptcha() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.captchaPath}'),
+        headers: IMConfig.baseHeaders,
+      );
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        if (body['code'] == 200) {
+          return body['data'] as Map<String, dynamic>;
+        }
+      }
+      return null;
+    } catch (e) {
+      _log('获取验证码异常: $e');
+      return null;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 短信验证码
+  // ═══════════════════════════════════════════════════════
+
+  /// 发送短信验证码
+  Future<({bool success, String message})> sendSmsCode(String phone) async {
+    try {
+      final response = await http.post(
+        Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.sendSmsCodePath}'),
+        headers: IMConfig.baseHeaders,
+        body: jsonEncode({'phone': phone}),
+      );
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      return (
+        success: body['code'] == 200,
+        message: (body['msg'] ?? '发送失败').toString(),
+      );
+    } catch (e) {
+      return (success: false, message: '网络异常: $e');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 注册
+  // ═══════════════════════════════════════════════════════
+
+  /// 注册新用户
+  Future<({bool success, String message})> register({
+    required String phone,
+    required String password,
+    required String nickname,
+    String? captchaId,
+    String? captchaCode,
+  }) async {
+    try {
+      final params = <String, dynamic>{
+        'phone': phone,
+        'password': password,
+        'nickname': nickname,
+      };
+      if (captchaId != null) params['captchaId'] = captchaId;
+      if (captchaCode != null) params['captchaCode'] = captchaCode;
+
+      final response = await http.post(
+        Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.registerPath}'),
+        headers: IMConfig.baseHeaders,
+        body: jsonEncode(params),
+      );
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      return (
+        success: body['code'] == 200,
+        message: (body['msg'] ?? '注册失败').toString(),
+      );
+    } catch (e) {
+      return (success: false, message: '网络异常: $e');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
   // 登录
   // ═══════════════════════════════════════════════════════
 
-  /// 手机号 + 密码登录（适配后端当前接口）
+  /// 手机号 + 密码登录
   Future<LoginResult> loginWithPassword(String phone, String password) async {
-    return _doLogin({
-      'phone': phone,
-      'password': password,
-    });
+    return _doLogin(
+      IMConfig.loginPath,
+      {'phone': phone, 'password': password},
+    );
   }
 
-  /// 手机号 + 验证码登录
-  Future<LoginResult> loginWithPhone(String phone, String code) async {
-    return _doLogin({
-      'phone': phone,
-      'code': code,
-    });
+  /// 手机号 + 验证码登录（后端路径: /auth/sms-login）
+  Future<LoginResult> loginWithSmsCode(String phone, String code) async {
+    return _doLogin(
+      IMConfig.smsLoginPath,
+      {'phone': phone, 'smsCode': code},
+    );
   }
 
   /// 微信授权登录
   Future<LoginResult> loginWithWechat(String wxCode) async {
-    return _doLogin({
-      'wx_code': wxCode,
-    });
+    return _doLogin(
+      IMConfig.loginPath,
+      {'wx_code': wxCode},
+    );
   }
 
-  /// 执行登录
-  Future<LoginResult> _doLogin(Map<String, dynamic> params) async {
+  /// 执行登录（支持不同路径）
+  Future<LoginResult> _doLogin(String apiPath, Map<String, dynamic> params) async {
     _isLoading = true;
     notifyListeners();
 
     try {
-      _log('正在登录...');
+      _log('正在登录... ($apiPath)');
 
-      // 1. 调用自建后端登录 API
+      // 1. 调用自建后端登录 API（带 X-App-Key）
       final response = await http.post(
-        Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.loginPath}'),
-        headers: {'Content-Type': 'application/json'},
+        Uri.parse('${IMConfig.apiBaseUrl}$apiPath'),
+        headers: IMConfig.baseHeaders,
         body: jsonEncode(params),
       );
 
-      if (response.statusCode != 200) {
+      if (response.statusCode != 200 && response.statusCode != 401) {
         return LoginResult(success: false, message: '网络请求失败: ${response.statusCode}');
       }
 
@@ -173,20 +261,18 @@ class AuthService extends ChangeNotifier {
       // 4. 从 im_auth 中获取 AppKey（后端下发）
       if (imAuth.containsKey('app_key') && imAuth['app_key'] != null) {
         IMConfig.setAppKey(imAuth['app_key'] as String);
-        _log('已从后端获取 AppKey');
+        _log('已从后端获取 IM AppKey: ${IMConfig.appKey.substring(0, 8)}...');
       }
 
       // 5. 持久化存储
       await _saveTokens(accid, imToken);
 
-      // 6. 登录网易云信 IM（需要 AppKey 已设置）
+      // 6. 登录网易云信 IM
       if (IMConfig.appKey.isNotEmpty) {
         final imSuccess = await IMService.instance.login(accid, imToken);
         if (!imSuccess) {
           _log('IM 登录失败，但业务登录成功');
-          // IM 登录失败不阻塞业务，后续会自动重连
         } else {
-          // 7. 初始化 IM 相关服务
           await _initIMServices();
         }
       } else {
@@ -194,7 +280,7 @@ class AuthService extends ChangeNotifier {
       }
 
       _isLoggedIn = true;
-      _log('登录成功: ${_currentUser?.nickname}');
+      _log('登录成功: ${_currentUser?.nickname} (${_currentUser?.role})');
 
       return LoginResult(
         success: true,
@@ -267,14 +353,13 @@ class AuthService extends ChangeNotifier {
         if (imSuccess) {
           await _initIMServices();
         } else {
-          _log('IM Token 过期，尝试重新获取');
-          // IM 登录失败不阻塞，业务仍然可用
+          _log('IM Token 可能过期，不阻塞业务');
         }
       }
 
       _isLoggedIn = true;
       notifyListeners();
-      _log('自动登录成功');
+      _log('自动登录成功: ${_currentUser?.nickname}');
       return true;
     } catch (e) {
       _log('自动登录异常: $e');
@@ -289,15 +374,12 @@ class AuthService extends ChangeNotifier {
   /// 登出
   Future<void> logout() async {
     try {
-      // 通知后端登出
+      // 通知后端登出（带 X-App-Key）
       if (_bizToken != null) {
         try {
           await http.post(
             Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.logoutPath}'),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $_bizToken',
-            },
+            headers: IMConfig.authHeaders(_bizToken!),
           );
         } catch (_) {
           // 忽略后端登出失败
@@ -323,13 +405,10 @@ class AuthService extends ChangeNotifier {
   }
 
   // ═══════════════════════════════════════════════════════
-  // Token 刷新（适配后端：refresh_token 通过 POST body 传递）
+  // Token 刷新
   // ═══════════════════════════════════════════════════════
 
-  /// 刷新业务 Token
-  /// 后端接口：POST /api/v1/auth/refresh-token
-  /// 请求体：{ "refresh_token": "xxx" }
-  /// 响应体：{ "code": 200, "data": { "biz_token": "xxx", "refresh_token": "xxx" } }
+  /// 刷新业务 Token（refresh_token 通过 POST body 传递）
   Future<bool> refreshBizToken() async {
     if (_refreshToken == null) return false;
 
@@ -338,7 +417,7 @@ class AuthService extends ChangeNotifier {
 
       final response = await http.post(
         Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.refreshTokenPath}'),
-        headers: {'Content-Type': 'application/json'},
+        headers: IMConfig.baseHeaders,
         body: jsonEncode({'refresh_token': _refreshToken}),
       );
 
@@ -358,13 +437,12 @@ class AuthService extends ChangeNotifier {
             final imToken = imAuth['im_token'] as String;
             await _saveTokens(accid, imToken);
 
-            // 更新 AppKey
             if (imAuth.containsKey('app_key') && imAuth['app_key'] != null) {
               IMConfig.setAppKey(imAuth['app_key'] as String);
             }
           }
 
-          // 持久化新的 biz_token 和 refresh_token
+          // 持久化新的 token
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString(_keyBizToken, _bizToken!);
           if (_refreshToken != null) {
@@ -385,6 +463,52 @@ class AuthService extends ChangeNotifier {
   }
 
   // ═══════════════════════════════════════════════════════
+  // 更新用户资料
+  // ═══════════════════════════════════════════════════════
+
+  /// 更新用户昵称/头像
+  Future<bool> updateProfile({String? nickname, String? avatar}) async {
+    if (_bizToken == null) return false;
+    try {
+      final params = <String, dynamic>{};
+      if (nickname != null) params['nickname'] = nickname;
+      if (avatar != null) params['avatar'] = avatar;
+
+      final response = await http.put(
+        Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.updateProfilePath}'),
+        headers: IMConfig.authHeaders(_bizToken!),
+        body: jsonEncode(params),
+      );
+
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        if (body['code'] == 200) {
+          // 更新本地用户信息
+          if (_currentUser != null) {
+            _currentUser = UserProfile(
+              userId: _currentUser!.userId,
+              nickname: nickname ?? _currentUser!.nickname,
+              avatar: avatar ?? _currentUser!.avatar,
+              role: _currentUser!.role,
+              phone: _currentUser!.phone,
+              email: _currentUser!.email,
+              status: _currentUser!.status,
+            );
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString(_keyUserProfile, jsonEncode(_currentUser!.toJson()));
+            notifyListeners();
+          }
+          return true;
+        }
+      }
+      return false;
+    } catch (e) {
+      _log('更新资料异常: $e');
+      return false;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
   // 获取当前用户信息
   // ═══════════════════════════════════════════════════════
 
@@ -395,7 +519,7 @@ class AuthService extends ChangeNotifier {
     try {
       final response = await http.get(
         Uri.parse('${IMConfig.apiBaseUrl}${IMConfig.mePath}'),
-        headers: {'Authorization': 'Bearer $_bizToken'},
+        headers: IMConfig.authHeaders(_bizToken!),
       );
 
       if (response.statusCode == 200) {
@@ -413,7 +537,6 @@ class AuthService extends ChangeNotifier {
             final imToken = imAuth['im_token'] as String;
             await _saveTokens(accid, imToken);
 
-            // 更新 AppKey
             if (imAuth.containsKey('app_key') && imAuth['app_key'] != null) {
               IMConfig.setAppKey(imAuth['app_key'] as String);
             }

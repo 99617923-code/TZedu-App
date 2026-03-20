@@ -18,7 +18,6 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:nim_core_v2/nim_core.dart';
-import 'package:nim_core_v2_platform_interface/src/platform_interface/nim_base_v2.dart';
 import '../config/im_config.dart';
 
 /// IM 连接状态枚举

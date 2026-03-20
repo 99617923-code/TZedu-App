@@ -8,6 +8,7 @@ import 'package:flutter/gestures.dart';
 import 'package:provider/provider.dart';
 import 'config/theme.dart';
 import 'pages/main_scaffold.dart';
+import 'pages/auth/login_page.dart';
 import 'services/im_service.dart';
 import 'services/auth_service.dart';
 import 'services/conversation_service.dart';
@@ -62,8 +63,30 @@ class TZIeltsApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: TZTheme.lightTheme,
         scrollBehavior: TZScrollBehavior(),
-        home: const MainScaffold(),
+        home: const _AuthGate(),
       ),
+    );
+  }
+}
+
+/// 认证网关：根据登录状态决定显示登录页还是主页面
+class _AuthGate extends StatelessWidget {
+  const _AuthGate();
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<AuthService>(
+      builder: (context, auth, _) {
+        if (auth.isLoggedIn) {
+          return const MainScaffold();
+        }
+        return LoginPage(
+          onLoginSuccess: () {
+            // 登录成功后 AuthService.isLoggedIn 变为 true，
+            // Consumer 会自动重建，切换到 MainScaffold
+          },
+        );
+      },
     );
   }
 }
