@@ -374,6 +374,101 @@ class LauncherViewModel: ObservableObject {
         }
     }
     
+    // MARK: - 更新启动器自身
+    @Published var isUpdating = false
+    
+    func updateSelf() {
+        guard !isUpdating else { return }
+        isUpdating = true
+        addLog("═══ 开始更新启动器 ═══", type: .header)
+        
+        let path = self.projectPath
+        let launcherDir = "\(path)/tools/TZDevLauncher"
+        
+        // Step 1: git pull
+        addLog("[1/4] 拉取最新代码...", type: .info)
+        runShell("cd \(path) && git pull origin main 2>&1") { [weak self] output, success in
+            guard let self = self else { return }
+            if !success {
+                self.addLog("拉取代码失败: \(String(output.prefix(200)))", type: .error)
+                self.isUpdating = false
+                return
+            }
+            self.addLog("代码拉取完成", type: .success)
+            
+            // Step 2: 编译
+            self.addLog("[2/4] 重新编译启动器...", type: .info)
+            let buildDir = "\(launcherDir)/.build"
+            let swiftSource = "\(launcherDir)/Sources/TZDevLauncherApp.swift"
+            let compileCmd = """
+                mkdir -p \(buildDir) && \
+                swiftc \
+                    -o \(buildDir)/TZDevLauncher \
+                    -target arm64-apple-macos13.0 \
+                    -sdk $(xcrun --show-sdk-path --sdk macosx) \
+                    -framework SwiftUI \
+                    -framework AppKit \
+                    -parse-as-library \
+                    \(swiftSource) 2>&1
+                """
+            self.runShell(compileCmd) { [weak self] output, success in
+                guard let self = self else { return }
+                if !success {
+                    // 尝试不指定 target 的通用编译
+                    self.addLog("ARM64 编译失败，尝试通用编译...", type: .warning)
+                    let fallbackCmd = """
+                        swiftc \
+                            -o \(buildDir)/TZDevLauncher \
+                            -sdk $(xcrun --show-sdk-path --sdk macosx) \
+                            -framework SwiftUI \
+                            -framework AppKit \
+                            -parse-as-library \
+                            \(swiftSource) 2>&1
+                        """
+                    self.runShell(fallbackCmd) { [weak self] output2, success2 in
+                        guard let self = self else { return }
+                        if !success2 {
+                            self.addLog("编译失败: \(String(output2.prefix(300)))", type: .error)
+                            self.isUpdating = false
+                            return
+                        }
+                        self.finishUpdate(buildDir: buildDir, launcherDir: launcherDir)
+                    }
+                    return
+                }
+                self.addLog("编译成功", type: .success)
+                self.finishUpdate(buildDir: buildDir, launcherDir: launcherDir)
+            }
+        }
+    }
+    
+    private func finishUpdate(buildDir: String, launcherDir: String) {
+        let appDir = NSHomeDirectory() + "/Desktop/途正开发启动器.app"
+        let macosDir = "\(appDir)/Contents/MacOS"
+        
+        // Step 3: 替换可执行文件
+        addLog("[3/4] 替换应用文件...", type: .info)
+        let replaceCmd = """
+            mkdir -p \(macosDir) && \
+            cp \(buildDir)/TZDevLauncher \(macosDir)/ && \
+            rm -rf \(buildDir) && \
+            xattr -cr \"\(appDir)\" 2>/dev/null || true
+            """
+        runShell(replaceCmd) { [weak self] output, success in
+            guard let self = self else { return }
+            if !success {
+                self.addLog("替换失败: \(output)", type: .error)
+                self.isUpdating = false
+                return
+            }
+            
+            // Step 4: 完成
+            self.addLog("[4/4] 更新完成", type: .success)
+            self.addLog("✅ 启动器已更新！请关闭当前窗口，重新双击桌面图标打开新版本。", type: .success)
+            self.isUpdating = false
+        }
+    }
+    
     // MARK: - 清理重建
     func cleanAndRebuild() {
         addLog("═══ 开始清理重建 ═══", type: .header)
@@ -631,6 +726,18 @@ struct ContentView: View {
                         .buttonStyle(.bordered)
                         .tint(.orange)
                         .controlSize(.regular)
+                        
+                        Divider()
+                            .padding(.vertical, 4)
+                        
+                        Button(action: { vm.updateSelf() }) {
+                            Label(vm.isUpdating ? "更新中..." : "更新启动器", systemImage: "arrow.down.app")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.blue)
+                        .controlSize(.regular)
+                        .disabled(vm.isUpdating)
                     }
                     .padding(.vertical, 4)
                 }
