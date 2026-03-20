@@ -6,12 +6,17 @@
 /// 2. 本地缓存用户信息，避免重复查询
 /// 3. 供聊天列表和聊天面板使用
 ///
+/// 安全机制：
+/// - 所有 NIM SDK 调用前都检查 IM 初始化和登录状态
+/// - 防止 SDK 未初始化时原生层 abort() 导致闪退
+///
 /// 注意：这里查询的是云信侧的用户信息（name, avatar），
 /// 业务侧的用户信息（角色、手机号等）由自建后端管理。
 
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:nim_core_v2/nim_core.dart';
+import 'im_service.dart';
 
 /// 缓存的用户信息
 class TZUserInfo {
@@ -54,6 +59,14 @@ class UserInfoService extends ChangeNotifier {
   StreamSubscription<List<NIMUserInfo>>? _userProfileChangedSub;
 
   // ═══════════════════════════════════════════════════════
+  // 安全检查
+  // ═══════════════════════════════════════════════════════
+
+  /// 检查 IM SDK 是否已初始化且已登录
+  bool get _isIMReady =>
+      IMService.instance.isInitialized && IMService.instance.isLoggedIn;
+
+  // ═══════════════════════════════════════════════════════
   // 查询
   // ═══════════════════════════════════════════════════════
 
@@ -62,6 +75,12 @@ class UserInfoService extends ChangeNotifier {
     // 先查缓存
     final cached = _cache[accid];
     if (cached != null && !cached.isExpired) {
+      return cached;
+    }
+
+    // IM 未就绪时返回缓存（即使过期）或 null
+    if (!_isIMReady) {
+      _log('IM 未就绪，返回缓存或 null');
       return cached;
     }
 
@@ -102,6 +121,12 @@ class UserInfoService extends ChangeNotifier {
       } else {
         needFetch.add(accid);
       }
+    }
+
+    // IM 未就绪时只返回缓存
+    if (!_isIMReady) {
+      _log('IM 未就绪，仅返回缓存数据');
+      return result;
     }
 
     // 批量查询未缓存的（每次最多 150 个）
@@ -148,6 +173,12 @@ class UserInfoService extends ChangeNotifier {
 
   /// 注册用户资料变化监听（使用 Stream 方式）
   void setupListeners() {
+    // IM 未就绪时不注册监听
+    if (!_isIMReady) {
+      _log('IM 未就绪，跳过用户资料监听注册');
+      return;
+    }
+
     _userProfileChangedSub =
         NimCore.instance.userService.onUserProfileChanged.listen((users) {
       _log('用户资料变化: ${users.length} 个');
@@ -164,6 +195,13 @@ class UserInfoService extends ChangeNotifier {
       }
       notifyListeners();
     });
+  }
+
+  /// 重置服务状态（登出时调用）
+  void reset() {
+    _cache.clear();
+    _userProfileChangedSub?.cancel();
+    _userProfileChangedSub = null;
   }
 
   void _log(String message) {

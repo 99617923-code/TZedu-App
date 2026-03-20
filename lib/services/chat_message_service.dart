@@ -8,6 +8,10 @@
 /// 4. 消息撤回、已读回执
 /// 5. 将云信 NIMMessage 转换为业务模型
 ///
+/// 安全机制：
+/// - 所有 NIM SDK 调用前都检查 IM 初始化和登录状态
+/// - 防止 SDK 未初始化时原生层 abort() 导致闪退
+///
 /// 使用方式：
 ///   final service = ChatMessageService.instance;
 ///   service.sendTextMessage(conversationId, '你好');
@@ -122,13 +126,21 @@ class ChatMessageService extends ChangeNotifier {
   StreamSubscription<List<NIMP2PMessageReadReceipt>>? _p2pReceiptSub;
 
   // ═══════════════════════════════════════════════════════
+  // 安全检查
+  // ═══════════════════════════════════════════════════════
+
+  /// 检查 IM SDK 是否已初始化且已登录
+  bool get _isIMReady =>
+      IMService.instance.isInitialized && IMService.instance.isLoggedIn;
+
+  // ═══════════════════════════════════════════════════════
   // 初始化
   // ═══════════════════════════════════════════════════════
 
   /// 初始化消息服务（在 IM 登录成功后调用）
   void initialize() {
-    if (!IMService.instance.isLoggedIn) {
-      _log('IM 未登录，无法初始化消息服务');
+    if (!_isIMReady) {
+      _log('IM 未就绪，跳过消息服务初始化');
       return;
     }
     _setupListeners();
@@ -137,6 +149,8 @@ class ChatMessageService extends ChangeNotifier {
   /// 注册消息监听（使用 Stream 方式）
   void _setupListeners() {
     if (_listenerRegistered) return;
+    if (!_isIMReady) return;
+
     _listenerRegistered = true;
 
     final msgService = NimCore.instance.messageService;
@@ -176,6 +190,11 @@ class ChatMessageService extends ChangeNotifier {
     String conversationId,
     String text,
   ) async {
+    if (!_isIMReady) {
+      _log('IM 未就绪，无法发送文本消息');
+      return null;
+    }
+
     try {
       _log('发送文本消息到: $conversationId');
 
@@ -219,6 +238,11 @@ class ChatMessageService extends ChangeNotifier {
     int width = 0,
     int height = 0,
   }) async {
+    if (!_isIMReady) {
+      _log('IM 未就绪，无法发送图片消息');
+      return null;
+    }
+
     try {
       _log('发送图片消息到: $conversationId');
 
@@ -262,6 +286,11 @@ class ChatMessageService extends ChangeNotifier {
     String audioPath,
     int duration,
   ) async {
+    if (!_isIMReady) {
+      _log('IM 未就绪，无法发送语音消息');
+      return null;
+    }
+
     try {
       _log('发送语音消息到: $conversationId');
 
@@ -303,6 +332,11 @@ class ChatMessageService extends ChangeNotifier {
     String conversationId,
     Map<String, dynamic> data,
   ) async {
+    if (!_isIMReady) {
+      _log('IM 未就绪，无法发送自定义消息');
+      return null;
+    }
+
     try {
       _log('发送自定义消息到: $conversationId');
 
@@ -351,6 +385,11 @@ class ChatMessageService extends ChangeNotifier {
     int limit = 50,
     NIMMessage? anchorMessage,
   }) async {
+    if (!_isIMReady) {
+      _log('IM 未就绪，无法查询历史消息');
+      return [];
+    }
+
     try {
       _log('查询历史消息: $conversationId, limit: $limit');
 
@@ -388,6 +427,8 @@ class ChatMessageService extends ChangeNotifier {
 
   /// 撤回消息
   Future<bool> revokeMessage(NIMMessage message) async {
+    if (!_isIMReady) return false;
+
     try {
       final result =
           await NimCore.instance.messageService.revokeMessage(message: message);
@@ -405,6 +446,8 @@ class ChatMessageService extends ChangeNotifier {
 
   /// 发送 P2P 已读回执
   Future<void> sendP2PReadReceipt(NIMMessage message) async {
+    if (!_isIMReady) return;
+
     try {
       await NimCore.instance.messageService.sendP2PMessageReceipt(message: message);
       _log('P2P 已读回执已发送');
@@ -415,12 +458,29 @@ class ChatMessageService extends ChangeNotifier {
 
   /// 发送群已读回执
   Future<void> sendTeamReadReceipt(List<NIMMessage> messages) async {
+    if (!_isIMReady) return;
+
     try {
       await NimCore.instance.messageService.sendTeamMessageReceipts(messages: messages);
       _log('群已读回执已发送');
     } catch (e) {
       _log('发送群已读回执异常: $e');
     }
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 重置
+  // ═══════════════════════════════════════════════════════
+
+  /// 重置服务状态（登出时调用）
+  void reset() {
+    _listenerRegistered = false;
+    _receiveMessageSub?.cancel();
+    _revokeSub?.cancel();
+    _p2pReceiptSub?.cancel();
+    _receiveMessageSub = null;
+    _revokeSub = null;
+    _p2pReceiptSub = null;
   }
 
   // ═══════════════════════════════════════════════════════

@@ -7,6 +7,10 @@
 /// 3. 未读数管理
 /// 4. 将云信 NIMConversation 转换为业务模型
 ///
+/// 安全机制：
+/// - 所有 NIM SDK 调用前都检查 IM 初始化和登录状态
+/// - 防止 SDK 未初始化时原生层 abort() 导致闪退
+///
 /// 使用方式：
 ///   final service = TZConversationService.instance;
 ///   service.conversationsStream.listen((list) { ... });
@@ -87,13 +91,22 @@ class TZConversationService extends ChangeNotifier {
   StreamSubscription<int>? _totalUnreadSub;
 
   // ═══════════════════════════════════════════════════════
+  // 安全检查
+  // ═══════════════════════════════════════════════════════
+
+  /// 检查 IM SDK 是否已初始化且已登录
+  /// 这是防止原生层 abort() 的关键守卫
+  bool get _isIMReady =>
+      IMService.instance.isInitialized && IMService.instance.isLoggedIn;
+
+  // ═══════════════════════════════════════════════════════
   // 初始化与监听
   // ═══════════════════════════════════════════════════════
 
   /// 初始化会话服务（在 IM 登录成功后调用）
   Future<void> initialize() async {
-    if (!IMService.instance.isLoggedIn) {
-      _log('IM 未登录，无法初始化会话服务');
+    if (!_isIMReady) {
+      _log('IM 未就绪（未初始化或未登录），跳过会话服务初始化');
       return;
     }
 
@@ -105,6 +118,8 @@ class TZConversationService extends ChangeNotifier {
   /// 注册会话变化监听（使用 Stream 方式）
   void _setupListeners() {
     if (_listenerRegistered) return;
+    if (!_isIMReady) return;
+
     _listenerRegistered = true;
 
     final convService = NimCore.instance.conversationService;
@@ -148,6 +163,12 @@ class TZConversationService extends ChangeNotifier {
 
   /// 加载会话列表
   Future<void> loadConversations() async {
+    // 关键守卫：IM 未就绪时不调用 NIM SDK
+    if (!_isIMReady) {
+      _log('IM 未就绪，跳过加载会话列表');
+      return;
+    }
+
     _isLoading = true;
     notifyListeners();
 
@@ -175,6 +196,8 @@ class TZConversationService extends ChangeNotifier {
 
   /// 置顶/取消置顶会话
   Future<bool> toggleStickTop(String conversationId) async {
+    if (!_isIMReady) return false;
+
     try {
       final conv = _conversations.firstWhere(
         (c) => c.conversationId == conversationId,
@@ -197,6 +220,8 @@ class TZConversationService extends ChangeNotifier {
 
   /// 删除会话
   Future<bool> deleteConversation(String conversationId) async {
+    if (!_isIMReady) return false;
+
     try {
       final result = await NimCore.instance.conversationService
           .deleteConversation(conversationId, true);
@@ -216,6 +241,8 @@ class TZConversationService extends ChangeNotifier {
 
   /// 标记会话已读
   Future<void> markConversationRead(String conversationId) async {
+    if (!_isIMReady) return;
+
     try {
       await NimCore.instance.conversationService
           .markConversationRead(conversationId);
@@ -344,6 +371,8 @@ class TZConversationService extends ChangeNotifier {
 
   /// 刷新总未读数
   Future<void> _refreshTotalUnread() async {
+    if (!_isIMReady) return;
+
     try {
       final result =
           await NimCore.instance.conversationService.getTotalUnreadCount();
@@ -355,6 +384,22 @@ class TZConversationService extends ChangeNotifier {
     } catch (e) {
       _log('获取总未读数异常: $e');
     }
+  }
+
+  /// 重置服务状态（登出时调用）
+  void reset() {
+    _conversations = [];
+    _totalUnreadCount = 0;
+    _listenerRegistered = false;
+    _convChangedSub?.cancel();
+    _convCreatedSub?.cancel();
+    _convDeletedSub?.cancel();
+    _totalUnreadSub?.cancel();
+    _convChangedSub = null;
+    _convCreatedSub = null;
+    _convDeletedSub = null;
+    _totalUnreadSub = null;
+    notifyListeners();
   }
 
   void _log(String message) {
