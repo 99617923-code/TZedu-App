@@ -81,10 +81,10 @@ class LauncherViewModel: ObservableObject {
     }
     
     func addLog(_ message: String, type: LogEntry.LogType = .info) {
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             let entry = LogEntry(message: message, type: type)
             self.logs.append(entry)
-            // 保留最近 500 条
             if self.logs.count > 500 {
                 self.logs.removeFirst(self.logs.count - 500)
             }
@@ -97,16 +97,16 @@ class LauncherViewModel: ObservableObject {
         isRunning = true
         addLog("═══ 开始启动开发环境 ═══", type: .header)
         
-        // 先拉取代码
-        pullCode {
-            // 安装依赖
-            self.installDeps {
-                // 启动各端
+        let currentProjectPath = self.projectPath
+        
+        pullCode { [weak self] in
+            guard let self = self else { return }
+            self.installDeps { [weak self] in
+                guard let self = self else { return }
                 if self.androidEnabled { self.startDevice("android") }
                 if self.iosEnabled { self.startDevice("ios") }
                 if self.macosEnabled { self.startDevice("macos") }
                 
-                // 启动自动同步
                 if self.autoSyncEnabled {
                     self.startAutoSync()
                 }
@@ -128,7 +128,8 @@ class LauncherViewModel: ObservableObject {
         }
         processes.removeAll()
         
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             self.androidStatus = .stopped
             self.iosStatus = .stopped
             self.macosStatus = .stopped
@@ -141,14 +142,15 @@ class LauncherViewModel: ObservableObject {
     // MARK: - 拉取代码
     func pullCode(completion: (() -> Void)? = nil) {
         addLog("正在拉取最新代码...", type: .info)
+        let path = self.projectPath
         
-        runShell("cd \(projectPath) && git pull origin main 2>&1") { output, success in
+        runShell("cd \(path) && git pull origin main 2>&1") { [weak self] output, success in
+            guard let self = self else { completion?(); return }
             if success {
                 if output.contains("Already up to date") {
                     self.addLog("代码已是最新", type: .info)
                 } else {
                     self.addLog("代码已更新", type: .success)
-                    // 如果有运行中的进程，发送 hot reload
                     self.hotReloadAll()
                 }
             } else {
@@ -161,12 +163,14 @@ class LauncherViewModel: ObservableObject {
     // MARK: - 安装依赖
     func installDeps(completion: (() -> Void)? = nil) {
         addLog("正在安装 Flutter 依赖...", type: .info)
+        let path = self.projectPath
         
-        runShell("cd \(projectPath) && flutter pub get 2>&1") { output, success in
+        runShell("cd \(path) && flutter pub get 2>&1") { [weak self] output, success in
+            guard let self = self else { completion?(); return }
             if success {
                 self.addLog("Flutter 依赖安装完成", type: .success)
             } else {
-                self.addLog("依赖安装失败: \(output.prefix(200))", type: .error)
+                self.addLog("依赖安装失败: \(String(output.prefix(200)))", type: .error)
             }
             completion?()
         }
@@ -174,9 +178,8 @@ class LauncherViewModel: ObservableObject {
     
     // MARK: - 启动设备
     private func startDevice(_ platform: String) {
-        let statusKey = platform
-        
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             switch platform {
             case "android": self.androidStatus = .starting
             case "ios": self.iosStatus = .starting
@@ -200,29 +203,32 @@ class LauncherViewModel: ObservableObject {
             return
         }
         
+        let path = self.projectPath
         let process = Process()
         let pipe = Pipe()
+        let inputPipe = Pipe()
         
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-l", "-c", "cd \(projectPath) && flutter run \(deviceFlag) 2>&1"]
+        process.arguments = ["-l", "-c", "cd \(path) && flutter run \(deviceFlag) 2>&1"]
         process.standardOutput = pipe
         process.standardError = pipe
+        process.standardInput = inputPipe
         process.environment = ProcessInfo.processInfo.environment
         
-        processes[statusKey] = process
+        processes[platform] = process
         
-        // 读取输出
         let fileHandle = pipe.fileHandleForReading
-        fileHandle.readabilityHandler = { handle in
+        fileHandle.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
+            guard let self = self else { return }
             
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             
-            // 检测启动成功
             if trimmed.contains("Flutter run key commands") || trimmed.contains("is taking longer than expected") {
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
                     switch platform {
                     case "android": self.androidStatus = .running
                     case "ios": self.iosStatus = .running
@@ -233,14 +239,15 @@ class LauncherViewModel: ObservableObject {
                 self.addLog("[\(platform.uppercased())] ✅ 启动成功", type: .success)
             }
             
-            // 过滤掉过长的编译日志
             if trimmed.count < 200 && !trimmed.hasPrefix("In file included") && !trimmed.hasPrefix("/Users") {
                 self.addLog("[\(platform.uppercased())] \(trimmed)", type: .device)
             }
         }
         
-        process.terminationHandler = { proc in
-            DispatchQueue.main.async {
+        process.terminationHandler = { [weak self] proc in
+            guard let self = self else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
                 switch platform {
                 case "android": self.androidStatus = proc.terminationStatus == 0 ? .stopped : .error
                 case "ios": self.iosStatus = proc.terminationStatus == 0 ? .stopped : .error
@@ -255,7 +262,8 @@ class LauncherViewModel: ObservableObject {
             try process.run()
         } catch {
             addLog("[\(platform.uppercased())] 启动失败: \(error.localizedDescription)", type: .error)
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
                 switch platform {
                 case "android": self.androidStatus = .error
                 case "ios": self.iosStatus = .error
@@ -270,19 +278,21 @@ class LauncherViewModel: ObservableObject {
     func hotReloadAll() {
         for (name, process) in processes {
             guard process.isRunning else { continue }
-            // 向 flutter run 的 stdin 发送 'r' 触发 hot reload
-            if let stdin = process.standardInput as? Pipe {
-                let data = "r".data(using: .utf8)!
-                stdin.fileHandleForWriting.write(data)
-                addLog("[\(name.uppercased())] 已发送 Hot Reload", type: .success)
+            if let inputPipe = process.standardInput as? Pipe {
+                if let data = "r".data(using: .utf8) {
+                    inputPipe.fileHandleForWriting.write(data)
+                    addLog("[\(name.uppercased())] 已发送 Hot Reload", type: .success)
+                }
             }
         }
     }
     
     // MARK: - 自动同步
     private func startAutoSync() {
-        DispatchQueue.main.async {
-            self.syncStatus = "运行中 (每\(Int(self.syncInterval))秒)"
+        let interval = self.syncInterval
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.syncStatus = "运行中 (每\(Int(interval))秒)"
         }
         addLog("自动同步已启动 (每\(Int(syncInterval))秒检测)", type: .info)
         
@@ -294,13 +304,15 @@ class LauncherViewModel: ObservableObject {
     private func stopAutoSync() {
         syncTimer?.invalidate()
         syncTimer = nil
-        DispatchQueue.main.async {
-            self.syncStatus = "未启动"
+        DispatchQueue.main.async { [weak self] in
+            self?.syncStatus = "未启动"
         }
     }
     
     private func checkForUpdates() {
-        runShell("cd \(projectPath) && git fetch origin main 2>&1 && git log HEAD..origin/main --oneline 2>&1") { output, success in
+        let path = self.projectPath
+        runShell("cd \(path) && git fetch origin main 2>&1 && git log HEAD..origin/main --oneline 2>&1") { [weak self] output, success in
+            guard let self = self else { return }
             if success && !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let lines = output.components(separatedBy: "\n").filter { !$0.isEmpty }
                 if lines.count > 0 && !output.contains("Already up to date") {
@@ -315,22 +327,26 @@ class LauncherViewModel: ObservableObject {
     func cleanAndRebuild() {
         addLog("═══ 开始清理重建 ═══", type: .header)
         
-        // 先停止所有
         stopAll()
         
-        runShell("cd \(projectPath) && flutter clean 2>&1") { output, success in
+        let path = self.projectPath
+        
+        runShell("cd \(path) && flutter clean 2>&1") { [weak self] output, success in
+            guard let self = self else { return }
             self.addLog("Flutter clean 完成", type: success ? .success : .error)
             
-            self.runShell("cd \(projectPath) && flutter pub get 2>&1") { output, success in
+            self.runShell("cd \(path) && flutter pub get 2>&1") { [weak self] output, success in
+                guard let self = self else { return }
                 self.addLog("Flutter pub get 完成", type: success ? .success : .error)
                 
                 // iOS pod install
-                self.runShell("cd \(projectPath)/ios && pod install 2>&1") { _, _ in
-                    self.addLog("iOS pod install 完成", type: .success)
+                self.runShell("cd \(path)/ios && pod install 2>&1") { [weak self] _, _ in
+                    self?.addLog("iOS pod install 完成", type: .success)
                 }
                 
                 // macOS pod install
-                self.runShell("cd \(projectPath)/macos && pod install 2>&1") { _, _ in
+                self.runShell("cd \(path)/macos && pod install 2>&1") { [weak self] _, _ in
+                    guard let self = self else { return }
                     self.addLog("macOS pod install 完成", type: .success)
                     self.addLog("✅ 清理重建完成，可以重新启动", type: .success)
                 }
@@ -415,19 +431,16 @@ struct ContentView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // 顶部标题栏
             headerBar
             
             Divider()
             
             HStack(spacing: 0) {
-                // 左侧控制面板
                 controlPanel
                     .frame(width: 260)
                 
                 Divider()
                 
-                // 右侧日志面板
                 logPanel
             }
         }
@@ -451,7 +464,6 @@ struct ContentView: View {
             
             Spacer()
             
-            // 状态指示灯
             HStack(spacing: 12) {
                 statusDot("Android", vm.androidStatus)
                 statusDot("iOS", vm.iosStatus)
@@ -478,7 +490,6 @@ struct ContentView: View {
     var controlPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // 平台选择
                 GroupBox(label: Label("启动平台", systemImage: "cpu")) {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle(isOn: $vm.androidEnabled) {
@@ -494,7 +505,6 @@ struct ContentView: View {
                     .padding(.vertical, 4)
                 }
                 
-                // 自动同步设置
                 GroupBox(label: Label("自动同步", systemImage: "arrow.triangle.2.circlepath")) {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle(isOn: $vm.autoSyncEnabled) {
@@ -524,10 +534,8 @@ struct ContentView: View {
                     .padding(.vertical, 4)
                 }
                 
-                // 操作按钮
                 GroupBox(label: Label("操作", systemImage: "play.circle")) {
                     VStack(spacing: 8) {
-                        // 一键启动 / 全部停止
                         if vm.isRunning {
                             Button(action: { vm.stopAll() }) {
                                 Label("全部停止", systemImage: "stop.fill")
@@ -582,7 +590,6 @@ struct ContentView: View {
     // MARK: - Log Panel
     var logPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // 日志标题
             HStack {
                 Label("运行日志", systemImage: "text.alignleft")
                     .font(.headline)
@@ -601,43 +608,62 @@ struct ContentView: View {
             
             Divider()
             
-            // 日志列表
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(vm.logs) { entry in
-                            HStack(alignment: .top, spacing: 6) {
-                                Text(entry.timeString)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 56, alignment: .leading)
-                                
-                                Image(systemName: entry.type.icon)
-                                    .font(.system(size: 10))
-                                    .foregroundColor(entry.type.color)
-                                    .frame(width: 14)
-                                
-                                Text(entry.message)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(entry.type.color)
-                                    .lineLimit(3)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 1)
-                            .id(entry.id)
+            LogScrollView(logs: vm.logs)
+                .background(Color(.textBackgroundColor).opacity(0.5))
+        }
+    }
+}
+
+// MARK: - Log Scroll View (separate struct to handle onChange properly)
+struct LogScrollView: View {
+    let logs: [LogEntry]
+    @State private var lastLogCount: Int = 0
+    
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(logs) { entry in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(entry.timeString)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .frame(width: 56, alignment: .leading)
+                            
+                            Image(systemName: entry.type.icon)
+                                .font(.system(size: 10))
+                                .foregroundColor(entry.type.color)
+                                .frame(width: 14)
+                            
+                            Text(entry.message)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(entry.type.color)
+                                .lineLimit(3)
                         }
-                    }
-                    .padding(.vertical, 4)
-                }
-                .onChange(of: vm.logs.count) { _ in
-                    if let last = vm.logs.last {
-                        withAnimation {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 1)
+                        .id(entry.id)
                     }
                 }
+                .padding(.vertical, 4)
             }
-            .background(Color(.textBackgroundColor).opacity(0.5))
+            .onAppear {
+                lastLogCount = logs.count
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                scrollToBottom(proxy: proxy)
+            }
+            .onChange(of: logs.count) { newCount in
+                scrollToBottom(proxy: proxy)
+            }
+        }
+    }
+    
+    private func scrollToBottom(proxy: ScrollViewProxy) {
+        if let last = logs.last {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(last.id, anchor: .bottom)
+            }
         }
     }
 }
