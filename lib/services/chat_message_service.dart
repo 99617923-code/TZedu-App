@@ -137,14 +137,25 @@ class ChatMessageService extends ChangeNotifier {
       IMService.instance.isLoggedIn &&
       IMService.instance.isDataSyncCompleted;
 
+  /// 宽松检查：只要 SDK 已初始化且已登录即可（不要求数据同步完成）
+  /// 桌面端数据同步状态可能在 initialize 调用时还未就绪
+  bool get _isIMConnected =>
+      IMService.instance.isInitialized &&
+      IMService.instance.isLoggedIn;
+
   // ═══════════════════════════════════════════════════════
   // 初始化
   // ═══════════════════════════════════════════════════════
 
   /// 初始化消息服务（在 IM 登录成功后调用）
   void initialize() {
-    if (!_isIMReady) {
-      _log('IM 未就绪，跳过消息服务初始化');
+    _log('initialize 调用 - isInitialized: ${IMService.instance.isInitialized}, '
+        'isLoggedIn: ${IMService.instance.isLoggedIn}, '
+        'isDataSyncCompleted: ${IMService.instance.isDataSyncCompleted}, '
+        'currentAccid: ${IMService.instance.currentAccid}');
+
+    if (!_isIMConnected) {
+      _log('IM 未连接（未初始化或未登录），跳过消息服务初始化');
       return;
     }
     _setupListeners();
@@ -153,15 +164,19 @@ class ChatMessageService extends ChangeNotifier {
   /// 注册消息监听（使用 Stream 方式）
   void _setupListeners() {
     if (_listenerRegistered) return;
-    if (!_isIMReady) return;
+    if (!_isIMConnected) return;
 
     _listenerRegistered = true;
+    _log('✅ 消息监听注册成功！accid: ${IMService.instance.currentAccid}');
 
     final msgService = NimCore.instance.messageService;
 
     // 接收新消息
     _receiveMessageSub = msgService.onReceiveMessages.listen((messages) {
       _log('收到新消息: ${messages.length} 条');
+      for (final m in messages) {
+        _log('  → from: ${m.senderId}, convId: ${m.conversationId}, text: ${m.text}');
+      }
       final tzMessages =
           messages.map((m) => _convertToTZMessage(m)).toList();
       _messageController.add(tzMessages);
@@ -200,7 +215,7 @@ class ChatMessageService extends ChangeNotifier {
     String conversationId,
     String text,
   ) async {
-    if (!_isIMReady) {
+    if (!_isIMConnected) {
       _log('IM 未就绪，无法发送文本消息');
       return null;
     }
@@ -248,7 +263,7 @@ class ChatMessageService extends ChangeNotifier {
     int width = 0,
     int height = 0,
   }) async {
-    if (!_isIMReady) {
+    if (!_isIMConnected) {
       _log('IM 未就绪，无法发送图片消息');
       return null;
     }
@@ -296,7 +311,7 @@ class ChatMessageService extends ChangeNotifier {
     String audioPath,
     int duration,
   ) async {
-    if (!_isIMReady) {
+    if (!_isIMConnected) {
       _log('IM 未就绪，无法发送语音消息');
       return null;
     }
@@ -342,8 +357,8 @@ class ChatMessageService extends ChangeNotifier {
     String conversationId,
     Map<String, dynamic> data,
   ) async {
-    if (!_isIMReady) {
-      _log('IM 未就绪，无法发送自定义消息');
+    if (!_isIMConnected) {
+      _log('IM 未就绪，无法发送文件消息');;
       return null;
     }
 
@@ -395,7 +410,7 @@ class ChatMessageService extends ChangeNotifier {
     int limit = 50,
     NIMMessage? anchorMessage,
   }) async {
-    if (!_isIMReady) {
+    if (!_isIMConnected) {
       _log('IM 未就绪，无法查询历史消息');
       return [];
     }
@@ -437,7 +452,7 @@ class ChatMessageService extends ChangeNotifier {
 
   /// 撤回消息
   Future<bool> revokeMessage(NIMMessage message) async {
-    if (!_isIMReady) return false;
+    if (!_isIMConnected) return false;
 
     try {
       final result =
@@ -456,10 +471,9 @@ class ChatMessageService extends ChangeNotifier {
 
   /// 发送 P2P 已读回执
   Future<void> sendP2PReadReceipt(NIMMessage message) async {
-    if (!_isIMReady) return;
-
+    if (!_isIMConnected) return;
     try {
-      await NimCore.instance.messageService.sendP2PMessageReceipt(message: message);
+      await NimCore.instance.messageService.sendP2PMessageReceiptt(message: message);
       _log('P2P 已读回执已发送');
     } catch (e) {
       _log('发送已读回执异常: $e');
@@ -468,10 +482,9 @@ class ChatMessageService extends ChangeNotifier {
 
   /// 发送群已读回执
   Future<void> sendTeamReadReceipt(List<NIMMessage> messages) async {
-    if (!_isIMReady) return;
-
+    if (!_isIMConnected) return;
     try {
-      await NimCore.instance.messageService.sendTeamMessageReceipts(messages: messages);
+      await NimCore.instance.messageService.sendTeamMessageReceiptss(messages: messages);
       _log('群已读回执已发送');
     } catch (e) {
       _log('发送群已读回执异常: $e');

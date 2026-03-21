@@ -142,11 +142,27 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
   /// 监听新消息
   void _listenNewMessages() {
     _messageSub = ChatMessageService.instance.messageStream.listen((messages) {
-      final relevant = messages
-          .where((m) => m.conversationId == widget.conversationId)
-          .toList();
+      debugPrint('[ChatPanelIM] messageStream 收到 ${messages.length} 条消息');
+      for (final m in messages) {
+        debugPrint('[ChatPanelIM]   → convId: ${m.conversationId}, '
+            'widget.convId: ${widget.conversationId}, '
+            'match: ${m.conversationId == widget.conversationId}, '
+            'from: ${m.senderId}, isMine: ${m.isMine}');
+      }
+
+      // 使用 targetId 匹配而非 conversationId 精确匹配
+      // 因为不同平台的 conversationId 格式可能不一致
+      final myTargetId = _extractTargetId(widget.conversationId);
+      final relevant = messages.where((m) {
+        final msgTargetId = _extractTargetId(m.conversationId);
+        // 匹配条件：相同的 targetId，或者发送者就是 targetId
+        return m.conversationId == widget.conversationId ||
+            msgTargetId == myTargetId ||
+            m.senderId == myTargetId;
+      }).toList();
 
       if (relevant.isNotEmpty) {
+        debugPrint('[ChatPanelIM] 匹配到 ${relevant.length} 条相关消息');
         setState(() => _messages.addAll(relevant));
         _scrollToBottom();
         _markRead();
