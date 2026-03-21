@@ -1,2 +1,6 @@
 #include? "Pods-Runner.debug.xcconfig"
 #include "Generated.xcconfig"
+
+// 覆盖 Generated.xcconfig 中的 EXCLUDED_ARCHS
+// YXAlog 已通过 Podfile arm64-to-sim 脚本修复，不再需要排除 arm64
+EXCLUDED_ARCHS[sdk=iphonesimulator*]=i386

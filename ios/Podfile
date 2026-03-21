@@ -262,4 +262,22 @@ post_install do |installer|
       config.build_settings.delete('EXCLUDED_ARCHS[sdk=iphonesimulator*]')
     end
   end
+
+  # ═══════════════════════════════════════════════════════════
+  # 修正 Flutter 自动生成的 Generated.xcconfig
+  # Flutter 检测到 YXAlog 的 EXCLUDED_ARCHS 后会在 Generated.xcconfig
+  # 中排除 arm64，但我们已经修复了 YXAlog，需要移除这个排除。
+  # 注意：Debug.xcconfig 和 Release.xcconfig 中也有覆盖作为双保险。
+  # ═══════════════════════════════════════════════════════════
+  generated_xcconfig = File.join(__dir__, 'Flutter', 'Generated.xcconfig')
+  if File.exist?(generated_xcconfig)
+    content = File.read(generated_xcconfig)
+    original = content.dup
+    # 将 EXCLUDED_ARCHS[sdk=iphonesimulator*]=i386 arm64 改为只排除 i386
+    content.gsub!(/EXCLUDED_ARCHS\[sdk=iphonesimulator\*\]=.*/, 'EXCLUDED_ARCHS[sdk=iphonesimulator*]=i386')
+    if content != original
+      File.write(generated_xcconfig, content)
+      puts "[TZ] ✅ 已修正 Generated.xcconfig，移除 arm64 排除"
+    end
+  end
 end
