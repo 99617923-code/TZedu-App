@@ -17,6 +17,10 @@ import 'services/chat_message_service.dart';
 import 'services/user_info_service.dart';
 import 'services/test_service.dart';
 import 'services/device_service.dart';
+import 'services/notification_service.dart';
+
+/// 全局 NavigatorKey（供 NotificationService 获取 Overlay）
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 /// 自定义 ScrollBehavior，确保所有平台（含 iOS/Web）都能正常滚动
 class TZScrollBehavior extends MaterialScrollBehavior {
@@ -54,8 +58,22 @@ void main() async {
   runApp(const TZIeltsApp());
 }
 
-class TZIeltsApp extends StatelessWidget {
+class TZIeltsApp extends StatefulWidget {
   const TZIeltsApp({super.key});
+
+  @override
+  State<TZIeltsApp> createState() => _TZIeltsAppState();
+}
+
+class _TZIeltsAppState extends State<TZIeltsApp> {
+  @override
+  void initState() {
+    super.initState();
+    // 延迟初始化通知服务（需要等 Navigator 就绪）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      NotificationService.instance.initialize(navigatorKey);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -69,6 +87,7 @@ class TZIeltsApp extends StatelessWidget {
         ChangeNotifierProvider.value(value: TestService.instance),
       ],
       child: MaterialApp(
+        navigatorKey: navigatorKey,
         title: '途正英语',
         debugShowCheckedModeBanner: false,
         theme: TZTheme.lightTheme,

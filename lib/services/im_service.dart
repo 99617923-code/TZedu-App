@@ -69,7 +69,13 @@ class IMService extends ChangeNotifier {
   String? _currentAccid;
   String? get currentAccid => _currentAccid;
 
-  bool get isLoggedIn => _connectionStatus == IMConnectionStatus.loggedIn;
+  /// 是否已登录（loggedIn 或 connected 都算已登录）
+  /// 原因：NIM SDK 登录成功后状态为 loggedIn，但随后 onConnectStatus 回调
+  /// 会触发 nimConnectStatusConnected，将状态改为 connected
+  /// 如果只检查 loggedIn，会导致 _isIMReady 为 false，消息收发被拒绝
+  bool get isLoggedIn =>
+      _connectionStatus == IMConnectionStatus.loggedIn ||
+      (_connectionStatus == IMConnectionStatus.connected && _currentAccid != null);
 
   /// 初始化失败的错误信息（用于 UI 展示）
   String? _initError;
@@ -340,10 +346,17 @@ class IMService extends ChangeNotifier {
 
     // 连接状态监听
     _connectStatusSub = loginService.onConnectStatus.listen((status) {
-      _log('连接状态变化: $status');
+      _log('连接状态变化: $status (当前: $_connectionStatus)');
       switch (status) {
         case NIMConnectStatus.nimConnectStatusConnected:
-          _updateStatus(IMConnectionStatus.connected);
+          // ═══ 关键修复：如果已经是 loggedIn 状态，不降级为 connected ═══
+          // NIM SDK 登录成功后会触发 nimConnectStatusConnected
+          // 如果降级为 connected，isLoggedIn 会变为 false，导致消息收发失败
+          if (_connectionStatus != IMConnectionStatus.loggedIn) {
+            _updateStatus(IMConnectionStatus.connected);
+          } else {
+            _log('已是 loggedIn 状态，保持不变（不降级为 connected）');
+          }
           break;
         case NIMConnectStatus.nimConnectStatusDisconnected:
           if (_connectionStatus != IMConnectionStatus.kicked) {
@@ -351,10 +364,17 @@ class IMService extends ChangeNotifier {
           }
           break;
         case NIMConnectStatus.nimConnectStatusConnecting:
-          _updateStatus(IMConnectionStatus.connecting);
+          // 如果已经是 loggedIn，说明是重连中，不降级状态
+          if (_connectionStatus != IMConnectionStatus.loggedIn) {
+            _updateStatus(IMConnectionStatus.connecting);
+          } else {
+            _log('已是 loggedIn 状态，重连中保持状态不变');
+          }
           break;
         case NIMConnectStatus.nimConnectStatusWaiting:
-          _updateStatus(IMConnectionStatus.connecting);
+          if (_connectionStatus != IMConnectionStatus.loggedIn) {
+            _updateStatus(IMConnectionStatus.connecting);
+          }
           break;
       }
     });
