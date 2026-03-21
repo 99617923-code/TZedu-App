@@ -256,15 +256,11 @@ class IMService extends ChangeNotifier {
 
         // ═══ 桌面端关键修复 ═══
         // 桌面端跳过了 conversationService 监听，loginService.onDataSync 可能不触发
-        // 因此在桌面端登录成功后，延迟一小段时间后强制标记数据同步完成
-        // 确保 ChatMessageService 等依赖 isDataSyncCompleted 的服务能正常初始化
+        // 因此在桌面端登录成功后立即标记数据同步完成
+        // 确保 _initIMServices 中 ChatMessageService.initialize() 能正常执行
         if (_isDesktopPlatform) {
-          Future.delayed(const Duration(seconds: 2), () {
-            if (!_isDataSyncCompleted) {
-              _log('桌面端：登录成功 2s 后强制标记数据同步完成');
-              _markDataSyncCompleted();
-            }
-          });
+          _log('桌面端：登录成功，立即标记数据同步完成');
+          _markDataSyncCompleted();
         }
 
         return true;

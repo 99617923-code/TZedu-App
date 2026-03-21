@@ -475,7 +475,7 @@ class TZConversationService extends ChangeNotifier {
   // ═══════════════════════════════════════════════════════
 
   /// 加载会话列表（移动端从 SDK 加载）
-  Future<void> loadConversations() async {
+  Future<void> loadConversations({bool isRetry = false}) async {
     if (_isDesktopPlatform) {
       // 桌面端从本地加载
       await _loadLocalConversations();
@@ -500,8 +500,22 @@ class TZConversationService extends ChangeNotifier {
             .toList();
         _sortAndNotify();
         _log('加载会话列表成功: ${_conversations.length} 条');
+
+        // 如果首次加载为空，延迟 3 秒重试一次（SDK 可能还没完全同步好会话数据）
+        if (_conversations.isEmpty && !isRetry) {
+          _log('会话列表为空，3秒后重试加载...');
+          Future.delayed(const Duration(seconds: 3), () {
+            loadConversations(isRetry: true);
+          });
+        }
       } else {
         _log('加载会话列表失败: ${result.errorDetails}');
+        // 加载失败也延迟重试
+        if (!isRetry) {
+          Future.delayed(const Duration(seconds: 3), () {
+            loadConversations(isRetry: true);
+          });
+        }
       }
     } catch (e) {
       _log('加载会话列表异常: $e');

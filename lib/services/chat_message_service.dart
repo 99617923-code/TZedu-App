@@ -21,7 +21,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:nim_core_v2/nim_core.dart';
+import '../config/im_config.dart';
 import 'im_service.dart';
+import 'conversation_service.dart';
 
 /// 业务消息模型（从云信 NIMMessage 转换而来）
 class TZMessage {
@@ -163,6 +165,12 @@ class ChatMessageService extends ChangeNotifier {
       final tzMessages =
           messages.map((m) => _convertToTZMessage(m)).toList();
       _messageController.add(tzMessages);
+
+      // ═══ 关键修复：收到新消息时自动更新会话列表 ═══
+      // 无论桌面端还是移动端，都通过 addOrUpdateLocalConversation 确保会话列表更新
+      for (final msg in messages) {
+        _autoUpdateConversation(msg);
+      }
     });
 
     // 消息撤回通知
@@ -580,6 +588,73 @@ class ChatMessageService extends ChangeNotifier {
       return attachment.duration;
     }
     return null;
+  }
+
+  /// 收到新消息时自动更新会话列表
+  /// 确保无论桌面端还是移动端，收到消息后会话列表都能自动出现
+  void _autoUpdateConversation(NIMMessage msg) {
+    try {
+      final conversationId = msg.conversationId ?? '';
+      if (conversationId.isEmpty) return;
+
+      final senderAccid = msg.senderId ?? '';
+      final text = _getMessagePreview(msg);
+
+      // 从 conversationId 解析会话类型和目标 ID
+      final parts = conversationId.split('|');
+      NIMConversationType type = NIMConversationType.p2p;
+      String targetId = conversationId;
+      if (parts.length >= 3) {
+        targetId = parts[2];
+        switch (parts[1]) {
+          case '1':
+            type = NIMConversationType.p2p;
+            break;
+          case '2':
+            type = NIMConversationType.team;
+            break;
+          case '3':
+            type = NIMConversationType.superTeam;
+            break;
+        }
+      }
+
+      TZConversationService.instance.addOrUpdateLocalConversation(
+        conversationId: conversationId,
+        type: type,
+        targetId: targetId,
+        name: senderAccid, // 先用 accid，后续可通过 UserInfoService 更新
+        lastMessage: text,
+      );
+    } catch (e) {
+      _log('自动更新会话列表异常: $e');
+    }
+  }
+
+  /// 获取消息预览文本
+  String _getMessagePreview(NIMMessage msg) {
+    switch (msg.messageType) {
+      case NIMMessageType.text:
+        return msg.text ?? '';
+      case NIMMessageType.image:
+        return '[图片]';
+      case NIMMessageType.audio:
+        return '[语音]';
+      case NIMMessageType.video:
+        return '[视频]';
+      case NIMMessageType.file:
+        return '[文件]';
+      case NIMMessageType.location:
+        return '[位置]';
+      case NIMMessageType.notification:
+        return '[通知]';
+      case NIMMessageType.tip:
+        return '[提示]';
+      case NIMMessageType.custom:
+        return '[自定义消息]';
+      default:
+        return '[消息]';
+    }
   }
 
   void _log(String message) {

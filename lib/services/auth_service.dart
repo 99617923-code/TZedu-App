@@ -658,9 +658,16 @@ class AuthService extends ChangeNotifier {
   /// 初始化 IM 相关服务
   Future<void> _initIMServices() async {
     try {
+      // 等待数据同步完成（桌面端已在 login 中立即标记，移动端需等待 SDK 同步）
+      final syncOk = await IMService.instance.waitForDataSync(
+        timeout: const Duration(seconds: 15),
+      );
+      _log('IM 数据同步状态: ${syncOk ? "已完成" : "超时（强制继续）"}');
+
       await TZConversationService.instance.initialize();
       ChatMessageService.instance.initialize();
       UserInfoService.instance.setupListeners();
+      _log('IM 服务初始化完成');
     } catch (e) {
       _log('IM 服务初始化异常: $e');
     }
