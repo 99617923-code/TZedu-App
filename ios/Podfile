@@ -59,7 +59,195 @@ target 'Runner' do
   end
 end
 
+# ═══════════════════════════════════════════════════════════
+# arm64-to-sim 修复函数
+# 将 YXAlog xcframework 的 device arm64 二进制转换为 simulator arm64，
+# 解决 Xcode 26 + iOS 26 Simulator 不再支持 Rosetta (x86_64) 的问题。
+#
+# 背景：
+#   YXAlog 1.0.10（网易云信 NIM SDK 日志依赖）的 xcframework 不包含
+#   arm64 simulator slice。在 Xcode 26 之前可以通过 EXCLUDED_ARCHS
+#   排除 arm64 并使用 Rosetta (x86_64) 模拟器运行。但 iOS 26 Simulator
+#   已移除 Rosetta 支持，只能运行 arm64 二进制。
+#
+# 原理：
+#   使用 Apple 自带的 vtool 工具修改 Mach-O 二进制的 LC_BUILD_VERSION，
+#   将 platform 从 IPHONEOS (2) 改为 IOSSIMULATOR (7)。
+#   这样链接器就能识别该二进制为 simulator 兼容。
+# ═══════════════════════════════════════════════════════════
+def fix_yxalog_arm64_simulator(installer)
+  pods_root = installer.sandbox.root
+
+  # 查找 YXAlog 的 xcframework
+  yxalog_xcfw = nil
+  Dir.glob("#{pods_root}/**/YXAlog*.xcframework").each do |path|
+    yxalog_xcfw = path
+    break
+  end
+
+  unless yxalog_xcfw
+    puts "[TZ] ⚠️  未找到 YXAlog xcframework，跳过 arm64-to-sim 修复"
+    return
+  end
+
+  puts "[TZ] 找到 YXAlog xcframework: #{yxalog_xcfw}"
+
+  # 查找 device arm64 目录
+  device_dir = Dir.glob("#{yxalog_xcfw}/ios-arm64*").reject { |d| d.include?('simulator') }.first
+  unless device_dir
+    puts "[TZ] ⚠️  未找到 device arm64 目录，跳过修复"
+    return
+  end
+
+  # 查找 simulator 目录
+  sim_dir = Dir.glob("#{yxalog_xcfw}/ios-*simulator*").first
+  unless sim_dir
+    puts "[TZ] ⚠️  未找到 simulator 目录，跳过修复"
+    return
+  end
+
+  puts "[TZ] Device 目录: #{device_dir}"
+  puts "[TZ] Simulator 目录: #{sim_dir}"
+
+  # 查找 framework 内的二进制文件
+  device_fw = Dir.glob("#{device_dir}/*.framework").first
+  sim_fw = Dir.glob("#{sim_dir}/*.framework").first
+
+  unless device_fw && sim_fw
+    puts "[TZ] ⚠️  未找到 framework 目录，跳过修复"
+    return
+  end
+
+  fw_name = File.basename(device_fw, '.framework')
+  device_binary = "#{device_fw}/#{fw_name}"
+  sim_binary = "#{sim_fw}/#{fw_name}"
+
+  unless File.exist?(device_binary)
+    puts "[TZ] ⚠️  未找到 device 二进制: #{device_binary}"
+    return
+  end
+
+  # 检查 simulator 二进制是否已经包含 arm64
+  lipo_info = `xcrun lipo -info "#{sim_binary}" 2>&1`
+  if lipo_info.include?('arm64') && !lipo_info.include?('arm64e')
+    puts "[TZ] ✅ Simulator 二进制已包含 arm64，无需修复"
+    return
+  end
+
+  puts "[TZ] 🔧 开始 arm64-to-sim 修复..."
+  puts "[TZ]    Simulator 当前架构: #{lipo_info.strip}"
+
+  # 创建临时目录
+  tmp_dir = "#{pods_root}/.yxalog_arm64_fix"
+  FileUtils.rm_rf(tmp_dir)
+  FileUtils.mkdir_p(tmp_dir)
+
+  # 从 device 二进制提取 arm64 slice
+  arm64_device = "#{tmp_dir}/arm64_device"
+  result = system("xcrun lipo -extract arm64 -output \"#{arm64_device}\" \"#{device_binary}\" 2>/dev/null")
+  unless result
+    # 如果 lipo -extract 失败，可能是 thin binary（只有 arm64）
+    FileUtils.cp(device_binary, arm64_device)
+  end
+
+  # 使用 vtool 将 platform 从 IPHONEOS 改为 IOSSIMULATOR
+  # platform 7 = IOSSIMULATOR, minos = 13.0, sdk = 13.0
+  arm64_sim = "#{tmp_dir}/arm64_sim"
+  vtool_result = system("xcrun vtool -arch arm64 -set-build-version 7 13.0 13.0 -replace -output \"#{arm64_sim}\" \"#{arm64_device}\" 2>&1")
+
+  unless vtool_result
+    puts "[TZ] ❌ vtool 转换失败，尝试备用方案..."
+    # 备用方案：直接复制并尝试用 vtool 不指定 -arch
+    vtool_result = system("xcrun vtool -set-build-version 7 13.0 13.0 -replace -output \"#{arm64_sim}\" \"#{arm64_device}\" 2>&1")
+    unless vtool_result
+      puts "[TZ] ❌ vtool 备用方案也失败，跳过修复"
+      FileUtils.rm_rf(tmp_dir)
+      return
+    end
+  end
+
+  # 验证转换结果
+  vtool_show = `xcrun vtool -show "#{arm64_sim}" 2>&1`
+  unless vtool_show.include?('IOSSIMULATOR')
+    puts "[TZ] ❌ vtool 转换验证失败，输出: #{vtool_show}"
+    FileUtils.rm_rf(tmp_dir)
+    return
+  end
+
+  puts "[TZ] ✅ vtool 转换成功，已设置 platform 为 IOSSIMULATOR"
+
+  # 检查现有 simulator 二进制是否包含 x86_64
+  has_x86_64 = lipo_info.include?('x86_64')
+
+  if has_x86_64
+    # 合并 arm64 (simulator) 和现有的 x86_64
+    x86_64_sim = "#{tmp_dir}/x86_64_sim"
+    system("xcrun lipo -extract x86_64 -output \"#{x86_64_sim}\" \"#{sim_binary}\"")
+
+    merged_binary = "#{tmp_dir}/merged"
+    merge_result = system("xcrun lipo -create \"#{arm64_sim}\" \"#{x86_64_sim}\" -output \"#{merged_binary}\"")
+
+    unless merge_result
+      puts "[TZ] ❌ lipo 合并失败，跳过修复"
+      FileUtils.rm_rf(tmp_dir)
+      return
+    end
+
+    # 替换 simulator 二进制
+    FileUtils.cp(merged_binary, sim_binary)
+    puts "[TZ] ✅ 已合并 arm64 + x86_64 到 simulator 二进制"
+  else
+    # 直接替换为 arm64 simulator 二进制
+    FileUtils.cp(arm64_sim, sim_binary)
+    puts "[TZ] ✅ 已替换 simulator 二进制为 arm64"
+  end
+
+  # 更新 Info.plist 中的 SupportedArchitectures（如果存在）
+  info_plist = "#{yxalog_xcfw}/Info.plist"
+  if File.exist?(info_plist)
+    # 读取 plist 并添加 arm64 到 simulator 的 SupportedArchitectures
+    plist_content = `/usr/libexec/PlistBuddy -c "Print" "#{info_plist}" 2>&1`
+    # 查找 simulator library 的索引
+    idx = 0
+    found_sim_idx = nil
+    while true
+      lib_id = `/usr/libexec/PlistBuddy -c "Print :AvailableLibraries:#{idx}:LibraryIdentifier" "#{info_plist}" 2>&1`
+      break if lib_id.include?('Does Not Exist')
+      if lib_id.include?('simulator')
+        found_sim_idx = idx
+        break
+      end
+      idx += 1
+    end
+
+    if found_sim_idx
+      # 检查是否已有 arm64
+      archs = `/usr/libexec/PlistBuddy -c "Print :AvailableLibraries:#{found_sim_idx}:SupportedArchitectures" "#{info_plist}" 2>&1`
+      unless archs.include?('arm64')
+        system("/usr/libexec/PlistBuddy -c \"Add :AvailableLibraries:#{found_sim_idx}:SupportedArchitectures: string arm64\" \"#{info_plist}\"")
+        puts "[TZ] ✅ 已更新 Info.plist，添加 arm64 到 simulator SupportedArchitectures"
+      end
+    end
+  end
+
+  # 验证最终结果
+  final_info = `xcrun lipo -info "#{sim_binary}" 2>&1`
+  puts "[TZ] ✅ 修复完成！Simulator 二进制架构: #{final_info.strip}"
+
+  # 清理临时文件
+  FileUtils.rm_rf(tmp_dir)
+
+  # 对 sim 二进制重新签名（ad-hoc）
+  system("codesign --force --sign - \"#{sim_fw}\" 2>/dev/null")
+  puts "[TZ] ✅ 已重新签名 simulator framework"
+end
+
 post_install do |installer|
+  # ═══════════════════════════════════════════════════════════
+  # 修复 YXAlog arm64 simulator 兼容性
+  # ═══════════════════════════════════════════════════════════
+  fix_yxalog_arm64_simulator(installer)
+
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
 
@@ -68,13 +256,10 @@ post_install do |installer|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
 
       # ═══════════════════════════════════════════════════════════
-      # 修复 YXAlog（网易云信 NIM SDK 日志依赖）不支持 arm64 模拟器的问题
-      # YXAlog 是旧的 .framework 格式，只包含 x86_64 模拟器架构，
-      # 不包含 arm64 模拟器架构（Apple Silicon Mac 默认使用 arm64 模拟器）。
-      # 解决方案：在模拟器构建时排除 arm64 架构，强制使用 Rosetta (x86_64) 运行。
-      # 注意：这只影响模拟器构建，真机构建不受影响。
+      # 移除 YXAlog podspec 自带的 EXCLUDED_ARCHS 设置
+      # 因为我们已经通过 arm64-to-sim 修复了二进制，不再需要排除 arm64
       # ═══════════════════════════════════════════════════════════
-      config.build_settings['EXCLUDED_ARCHS[sdk=iphonesimulator*]'] = 'arm64'
+      config.build_settings.delete('EXCLUDED_ARCHS[sdk=iphonesimulator*]')
     end
   end
 end
