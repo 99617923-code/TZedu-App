@@ -63,9 +63,18 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
 
-    # 确保最低部署版本一致
     target.build_configurations.each do |config|
+      # 确保最低部署版本一致
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
+
+      # ═══════════════════════════════════════════════════════════
+      # 修复 YXAlog（网易云信 NIM SDK 日志依赖）不支持 arm64 模拟器的问题
+      # YXAlog 是旧的 .framework 格式，只包含 x86_64 模拟器架构，
+      # 不包含 arm64 模拟器架构（Apple Silicon Mac 默认使用 arm64 模拟器）。
+      # 解决方案：在模拟器构建时排除 arm64 架构，强制使用 Rosetta (x86_64) 运行。
+      # 注意：这只影响模拟器构建，真机构建不受影响。
+      # ═══════════════════════════════════════════════════════════
+      config.build_settings['EXCLUDED_ARCHS[sdk=iphonesimulator*]'] = 'arm64'
     end
   end
 end
