@@ -473,7 +473,7 @@ class ChatMessageService extends ChangeNotifier {
   Future<void> sendP2PReadReceipt(NIMMessage message) async {
     if (!_isIMConnected) return;
     try {
-      await NimCore.instance.messageService.sendP2PMessageReceiptt(message: message);
+      await NimCore.instance.messageService.sendP2PMessageReceipt(message: message);
       _log('P2P 已读回执已发送');
     } catch (e) {
       _log('发送已读回执异常: $e');
@@ -484,7 +484,7 @@ class ChatMessageService extends ChangeNotifier {
   Future<void> sendTeamReadReceipt(List<NIMMessage> messages) async {
     if (!_isIMConnected) return;
     try {
-      await NimCore.instance.messageService.sendTeamMessageReceiptss(messages: messages);
+      await NimCore.instance.messageService.sendTeamMessageReceipts(messages: messages);
       _log('群已读回执已发送');
     } catch (e) {
       _log('发送群已读回执异常: $e');

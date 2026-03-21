@@ -71,7 +71,7 @@ class _TZIeltsAppState extends State<TZIeltsApp> {
     super.initState();
     // 延迟初始化通知服务（需要等 Navigator 就绪）
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      NotificationService.instance.initialize(navigatorKey);
+      AppNotificationService.instance.initialize(navigatorKey);
     });
   }
 

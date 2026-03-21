@@ -7,8 +7,8 @@
 /// 3. 管理通知显示状态（当前聊天页面不弹通知）
 ///
 /// 使用方式：
-///   NotificationService.instance.initialize(navigatorKey);
-///   NotificationService.instance.showInAppNotification(senderName, message);
+///   AppNotificationService.instance.initialize(navigatorKey);
+///   AppNotificationService.instance.showInAppNotification(senderName, message);
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -18,14 +18,14 @@ import 'conversation_service.dart';
 import 'user_info_service.dart';
 import 'im_service.dart';
 
-class NotificationService {
+class AppNotificationService {
   // ═══════════════════════════════════════════════════════
   // 单例
   // ═══════════════════════════════════════════════════════
 
-  static final NotificationService _instance = NotificationService._internal();
-  static NotificationService get instance => _instance;
-  NotificationService._internal();
+  static final AppNotificationService _instance = AppNotificationService._internal();
+  static AppNotificationService get instance => _instance;
+  AppNotificationService._internal();
 
   // ═══════════════════════════════════════════════════════
   // 状态
@@ -195,7 +195,7 @@ class NotificationService {
       _notificationTapController.stream;
 
   void _log(String message) {
-    debugPrint('[NotificationService] $message');
+    debugPrint('[AppNotificationService] $message');
   }
 
   void dispose() {
