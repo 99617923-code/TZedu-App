@@ -253,6 +253,20 @@ class IMService extends ChangeNotifier {
         _currentAccid = accid;
         _updateStatus(IMConnectionStatus.loggedIn);
         _log('IM 登录成功，等待数据同步...');
+
+        // ═══ 桌面端关键修复 ═══
+        // 桌面端跳过了 conversationService 监听，loginService.onDataSync 可能不触发
+        // 因此在桌面端登录成功后，延迟一小段时间后强制标记数据同步完成
+        // 确保 ChatMessageService 等依赖 isDataSyncCompleted 的服务能正常初始化
+        if (_isDesktopPlatform) {
+          Future.delayed(const Duration(seconds: 2), () {
+            if (!_isDataSyncCompleted) {
+              _log('桌面端：登录成功 2s 后强制标记数据同步完成');
+              _markDataSyncCompleted();
+            }
+          });
+        }
+
         return true;
       } else {
         _updateStatus(IMConnectionStatus.disconnected);

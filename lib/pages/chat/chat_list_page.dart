@@ -5,7 +5,8 @@
 /// 桌面端：微信桌面版左右分栏布局（左侧聊天列表 + 右侧聊天内容）
 ///
 /// 数据来源：
-/// - 已登录 IM：从 TZConversationService 获取真实会话数据
+/// - 已登录 IM（移动端）：从 NIM SDK ConversationService 获取真实会话数据
+/// - 已登录 IM（桌面端）：从本地缓存获取会话数据（NIM PC SDK ConversationService 不可用）
 /// - 未登录 IM：显示 Mock 数据（开发/演示模式）
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -37,6 +38,8 @@ class _ChatListPageState extends State<ChatListPage> {
   final TextEditingController _searchController = TextEditingController();
 
   /// 是否使用真实 IM 数据
+  /// 移动端：IM 已登录即可
+  /// 桌面端：IM 已登录即可（使用本地会话管理模式）
   bool get _useRealIM => context.read<IMService>().isLoggedIn;
 
   // ═══════════════════════════════════════════════════════
@@ -179,6 +182,14 @@ class _ChatListPageState extends State<ChatListPage> {
       final conversationId = result.data!;
       debugPrint('[ChatListPage] 发起 P2P 聊天: $targetAccid -> $conversationId');
 
+      // 在本地会话列表中添加/更新此会话（桌面端和移动端都适用）
+      await TZConversationService.instance.addOrUpdateLocalConversation(
+        conversationId: conversationId,
+        type: NIMConversationType.p2p,
+        targetId: targetAccid,
+        name: displayName,
+      );
+
       if (!mounted) return;
 
       final isDesktop = Responsive.isDesktop(context);
@@ -287,22 +298,39 @@ class _ChatListPageState extends State<ChatListPage> {
   }
 
   Widget _buildEmptyPanel() {
+    final imService = context.watch<IMService>();
+    final isIMConnected = imService.isLoggedIn;
+
     return Container(
       color: const Color(0xFFFAFAFA),
-      child: const Center(
+      child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.chat_bubble_outline, size: 64, color: Color(0xFFE5E7EB)),
-            SizedBox(height: 16),
+            Icon(
+              isIMConnected ? Icons.chat_bubble_outline : Icons.cloud_off,
+              size: 64,
+              color: const Color(0xFFE5E7EB),
+            ),
+            const SizedBox(height: 16),
             Text(
-              '选择一个聊天开始对话',
-              style: TextStyle(
+              isIMConnected ? '选择一个聊天开始对话' : '选择一个聊天开始对话',
+              style: const TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
                 color: Color(0xFF9CA3AF),
               ),
             ),
+            if (isIMConnected) ...[
+              const SizedBox(height: 8),
+              Text(
+                '点击 + 按钮搜索手机号发起新聊天',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: const Color(0xFF9CA3AF).withOpacity(0.7),
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -365,7 +393,7 @@ class _ChatListPageState extends State<ChatListPage> {
               ),
               const SizedBox(width: 8),
               // IM 连接状态指示
-              _buildConnectionIndicator(imService.connectionStatus),
+              _buildConnectionIndicator(imService),
               const Spacer(),
               // 搜索按钮
               _buildIconButton(
@@ -406,10 +434,14 @@ class _ChatListPageState extends State<ChatListPage> {
     );
   }
 
-  /// IM 连接状态指示器
-  Widget _buildConnectionIndicator(IMConnectionStatus status) {
+  /// IM 连接状态指示器（改进版：区分桌面模式和演示模式）
+  Widget _buildConnectionIndicator(IMService imService) {
     Color color;
     String text;
+    IconData? icon;
+
+    final status = imService.connectionStatus;
+
     switch (status) {
       case IMConnectionStatus.loggedIn:
         color = const Color(0xFF10B981);
@@ -426,14 +458,24 @@ class _ChatListPageState extends State<ChatListPage> {
       case IMConnectionStatus.kicked:
         color = const Color(0xFFEF4444);
         text = '被踢出';
+        icon = Icons.warning_amber;
         break;
       case IMConnectionStatus.tokenExpired:
         color = const Color(0xFFEF4444);
         text = 'Token过期';
+        icon = Icons.warning_amber;
         break;
       case IMConnectionStatus.disconnected:
-        color = const Color(0xFF9CA3AF);
-        text = '演示模式';
+        // 区分：业务已登录但 IM 未连接 vs 完全未登录
+        final authService = context.read<AuthService>();
+        if (authService.isLoggedIn) {
+          color = const Color(0xFFF59E0B);
+          text = '未连接';
+          icon = Icons.cloud_off;
+        } else {
+          color = const Color(0xFF9CA3AF);
+          text = '演示模式';
+        }
         break;
     }
 
@@ -446,15 +488,20 @@ class _ChatListPageState extends State<ChatListPage> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(
-              color: color,
-              shape: BoxShape.circle,
+          if (icon != null) ...[
+            Icon(icon, size: 10, color: color),
+            const SizedBox(width: 2),
+          ] else ...[
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(
+                color: color,
+                shape: BoxShape.circle,
+              ),
             ),
-          ),
-          const SizedBox(width: 4),
+            const SizedBox(width: 4),
+          ],
           Text(
             text,
             style: TextStyle(
@@ -504,14 +551,14 @@ class _ChatListPageState extends State<ChatListPage> {
 
         // 根据 IM 登录状态决定数据来源
         if (imService.isLoggedIn) ...[
-          // ═══ 真实 IM 会话列表 ═══
+          // ═══ 真实 IM 会话列表（移动端从 SDK，桌面端从本地缓存） ═══
           if (convService.isLoading)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 48),
               child: Center(child: CircularProgressIndicator()),
             )
           else if (_filteredIMConversations.isEmpty)
-            _buildEmptyList()
+            _buildEmptyIMList()
           else
             ..._filteredIMConversations.map((conv) {
               final isDesktop = Responsive.isDesktop(context);
@@ -551,6 +598,7 @@ class _ChatListPageState extends State<ChatListPage> {
 
     return GestureDetector(
       onTap: () => _onIMConversationTap(conv),
+      onLongPress: () => _showConversationActions(conv),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.all(12),
@@ -591,22 +639,10 @@ class _ChatListPageState extends State<ChatListPage> {
                           width: 48,
                           height: 48,
                           fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => Icon(
-                            isP2P ? Icons.person : Icons.group,
-                            color: isP2P
-                                ? const Color(0xFF3B82F6)
-                                : const Color(0xFF10B981),
-                            size: 24,
-                          ),
+                          errorBuilder: (_, __, ___) => _buildConversationAvatarFallback(conv, isP2P),
                         ),
                       )
-                    : Icon(
-                        isP2P ? Icons.person : Icons.group,
-                        color: isP2P
-                            ? const Color(0xFF3B82F6)
-                            : const Color(0xFF10B981),
-                        size: 24,
-                      ),
+                    : _buildConversationAvatarFallback(conv, isP2P),
               ),
             ),
             const SizedBox(width: 12),
@@ -685,6 +721,122 @@ class _ChatListPageState extends State<ChatListPage> {
     );
   }
 
+  /// 会话头像回退显示（名称首字母或图标）
+  Widget _buildConversationAvatarFallback(TZConversation conv, bool isP2P) {
+    final displayName = conv.name.isNotEmpty ? conv.name : conv.targetId;
+    if (displayName.isNotEmpty) {
+      return Text(
+        displayName[0].toUpperCase(),
+        style: TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.w700,
+          color: isP2P ? const Color(0xFF3B82F6) : const Color(0xFF10B981),
+        ),
+      );
+    }
+    return Icon(
+      isP2P ? Icons.person : Icons.group,
+      color: isP2P ? const Color(0xFF3B82F6) : const Color(0xFF10B981),
+      size: 24,
+    );
+  }
+
+  /// 长按会话显示操作菜单
+  void _showConversationActions(TZConversation conv) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 标题
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                child: Text(
+                  conv.name.isNotEmpty ? conv.name : conv.targetId,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+              ),
+              const Divider(),
+              // 置顶/取消置顶
+              ListTile(
+                leading: Icon(
+                  conv.isStickTop ? Icons.push_pin_outlined : Icons.push_pin,
+                  color: const Color(0xFF7C3AED),
+                ),
+                title: Text(conv.isStickTop ? '取消置顶' : '置顶'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  TZConversationService.instance.toggleStickTop(conv.conversationId);
+                },
+              ),
+              // 标记已读
+              if (conv.unreadCount > 0)
+                ListTile(
+                  leading: const Icon(Icons.done_all, color: Color(0xFF10B981)),
+                  title: const Text('标记已读'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    TZConversationService.instance.markConversationRead(conv.conversationId);
+                  },
+                ),
+              // 删除会话
+              ListTile(
+                leading: const Icon(Icons.delete_outline, color: Color(0xFFEF4444)),
+                title: const Text('删除会话', style: TextStyle(color: Color(0xFFEF4444))),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _confirmDeleteConversation(conv);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 确认删除会话
+  void _confirmDeleteConversation(TZConversation conv) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('删除会话'),
+        content: Text('确定要删除与 "${conv.name.isNotEmpty ? conv.name : conv.targetId}" 的会话吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消', style: TextStyle(color: Color(0xFF6B7280))),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              TZConversationService.instance.deleteConversation(conv.conversationId);
+              if (_selectedConversationId == conv.conversationId) {
+                setState(() => _selectedConversationId = null);
+              }
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFEF4444),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+  }
+
   String _formatTime(DateTime time) {
     final now = DateTime.now();
     final diff = now.difference(time);
@@ -753,12 +905,68 @@ class _ChatListPageState extends State<ChatListPage> {
     );
   }
 
+  /// IM 已登录但会话列表为空时的提示
+  Widget _buildEmptyIMList() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 48),
+      child: Column(
+        children: [
+          const Icon(Icons.chat_bubble_outline, size: 48, color: Color(0xFFD1D5DB)),
+          const SizedBox(height: 12),
+          const Text(
+            '暂无聊天记录',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF9CA3AF),
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '点击右上角 + 搜索手机号发起新聊天',
+            style: TextStyle(
+              fontSize: 12,
+              color: Color(0xFFD1D5DB),
+            ),
+          ),
+          const SizedBox(height: 16),
+          GestureDetector(
+            onTap: _showNewChatDialog,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF5F3FF),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFDDD6FE)),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.person_add_alt_1, size: 16, color: Color(0xFF7C3AED)),
+                  SizedBox(width: 6),
+                  Text(
+                    '发起新聊天',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF7C3AED),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildEmptyList() {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 48),
       child: Column(
         children: [
-          Icon(Icons.chat_bubble_outline, size: 48, color: const Color(0xFFD1D5DB)),
+          const Icon(Icons.chat_bubble_outline, size: 48, color: Color(0xFFD1D5DB)),
           const SizedBox(height: 12),
           const Text(
             '暂无聊天记录',

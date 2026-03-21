@@ -1,2 +1,3 @@
 #include? "Pods-Runner.release.xcconfig"
+#include? "Pods-Runner.profile.xcconfig"
 #include "Generated.xcconfig"

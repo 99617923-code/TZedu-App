@@ -40,6 +40,13 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
 
   String get _myAccid => IMService.instance.currentAccid ?? '';
 
+  /// 从 conversationId 中提取 targetId
+  /// conversationId 格式: {appId}|{type}|{targetId}
+  String _extractTargetId(String conversationId) {
+    final parts = conversationId.split('|');
+    return parts.length >= 3 ? parts[2] : conversationId;
+  }
+
   // 会话信息
   String _conversationName = '';
   String _conversationAvatar = '';
@@ -204,6 +211,18 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
       }
     });
     _scrollToBottom();
+
+    // 同步更新本地会话列表的最后一条消息（桌面端本地会话管理需要）
+    if (result != null) {
+      TZConversationService.instance.addOrUpdateLocalConversation(
+        conversationId: widget.conversationId,
+        type: _isP2P ? NIMConversationType.p2p : NIMConversationType.team,
+        targetId: _extractTargetId(widget.conversationId),
+        name: _conversationName,
+        avatar: _conversationAvatar,
+        lastMessage: text,
+      );
+    }
   }
 
   void _scrollToBottom() {

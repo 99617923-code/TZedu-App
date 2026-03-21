@@ -7,26 +7,31 @@
 /// 3. 未读数管理
 /// 4. 将云信 NIMConversation 转换为业务模型
 ///
-/// 安全机制：
-/// - macOS/Windows 桌面端：NIM PC SDK 的 ConversationService 存在原生层缺陷
+/// 双模式架构：
+/// - 移动端（iOS/Android）：正常调用 NIM SDK ConversationService
+/// - 桌面端（macOS/Windows）：NIM PC SDK 的 ConversationService 存在原生层缺陷
 ///   （构造函数注册 listener 时抛出 misuse，后续所有调用均会触发 C++ 异常导致 abort）
-///   因此在桌面端完全跳过 ConversationService 的原生调用，使用空列表
-/// - 移动端（iOS/Android）：正常调用 NIM SDK
+///   因此在桌面端使用"本地会话管理"模式：
+///   · 通过 SharedPreferences 持久化手动创建的会话
+///   · 通过 MessageService 接收新消息时自动创建/更新本地会话
+///   · 消息收发功能完全正常（MessageService 不受影响）
 ///
 /// 使用方式：
 ///   final service = TZConversationService.instance;
 ///   service.conversationsStream.listen((list) { ... });
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:nim_core_v2/nim_core.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'im_service.dart';
 
 // 条件导入：用于平台检测
 import 'platform_check_stub.dart'
     if (dart.library.io) 'platform_check_io.dart' as platformCheck;
 
-/// 业务会话模型（从云信 NIMConversation 转换而来）
+/// 业务会话模型（从云信 NIMConversation 转换而来，或桌面端本地创建）
 class TZConversation {
   final String conversationId;
   final NIMConversationType type; // p2p / team / superTeam
@@ -39,7 +44,7 @@ class TZConversation {
   final bool isStickTop;
   final bool isMuted;
 
-  /// 云信原始会话对象（保留以便后续操作）
+  /// 云信原始会话对象（保留以便后续操作，桌面端本地会话为 null）
   final NIMConversation? raw;
 
   TZConversation({
@@ -55,6 +60,63 @@ class TZConversation {
     this.isMuted = false,
     this.raw,
   });
+
+  /// 序列化为 JSON（用于桌面端本地持久化）
+  Map<String, dynamic> toJson() => {
+    'conversationId': conversationId,
+    'type': type.index,
+    'targetId': targetId,
+    'name': name,
+    'avatar': avatar,
+    'lastMessage': lastMessage,
+    'lastMessageTime': lastMessageTime?.millisecondsSinceEpoch,
+    'unreadCount': unreadCount,
+    'isStickTop': isStickTop,
+    'isMuted': isMuted,
+  };
+
+  /// 从 JSON 反序列化（用于桌面端本地恢复）
+  factory TZConversation.fromJson(Map<String, dynamic> json) {
+    return TZConversation(
+      conversationId: json['conversationId'] ?? '',
+      type: NIMConversationType.values[json['type'] ?? 0],
+      targetId: json['targetId'] ?? '',
+      name: json['name'] ?? '',
+      avatar: json['avatar'] ?? '',
+      lastMessage: json['lastMessage'] ?? '',
+      lastMessageTime: json['lastMessageTime'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['lastMessageTime'])
+          : null,
+      unreadCount: json['unreadCount'] ?? 0,
+      isStickTop: json['isStickTop'] ?? false,
+      isMuted: json['isMuted'] ?? false,
+    );
+  }
+
+  /// 创建更新后的副本
+  TZConversation copyWith({
+    String? name,
+    String? avatar,
+    String? lastMessage,
+    DateTime? lastMessageTime,
+    int? unreadCount,
+    bool? isStickTop,
+    bool? isMuted,
+  }) {
+    return TZConversation(
+      conversationId: conversationId,
+      type: type,
+      targetId: targetId,
+      name: name ?? this.name,
+      avatar: avatar ?? this.avatar,
+      lastMessage: lastMessage ?? this.lastMessage,
+      lastMessageTime: lastMessageTime ?? this.lastMessageTime,
+      unreadCount: unreadCount ?? this.unreadCount,
+      isStickTop: isStickTop ?? this.isStickTop,
+      isMuted: isMuted ?? this.isMuted,
+      raw: raw,
+    );
+  }
 }
 
 class TZConversationService extends ChangeNotifier {
@@ -96,6 +158,12 @@ class TZConversationService extends ChangeNotifier {
   StreamSubscription<List<String>>? _convDeletedSub;
   StreamSubscription<int>? _totalUnreadSub;
 
+  // 桌面端新消息监听
+  StreamSubscription<List<NIMMessage>>? _desktopMessageSub;
+
+  // 本地持久化 Key
+  static const String _localConversationsKey = 'tz_local_conversations';
+
   // ═══════════════════════════════════════════════════════
   // 平台安全检查
   // ═══════════════════════════════════════════════════════
@@ -107,12 +175,17 @@ class TZConversationService extends ChangeNotifier {
     return platformCheck.isDesktopPlatform();
   }
 
-  /// 检查 IM SDK 是否已初始化、已登录且数据同步完成
+  /// 检查 IM SDK 是否已初始化、已登录且数据同步完成（移动端专用）
   bool get _isIMReady =>
       !_isDesktopPlatform &&
       IMService.instance.isInitialized &&
       IMService.instance.isLoggedIn &&
       IMService.instance.isDataSyncCompleted;
+
+  /// 检查 IM SDK 是否已登录（桌面端也可用，不依赖 ConversationService）
+  bool get _isIMLoggedIn =>
+      IMService.instance.isInitialized &&
+      IMService.instance.isLoggedIn;
 
   // ═══════════════════════════════════════════════════════
   // 初始化与监听
@@ -120,14 +193,24 @@ class TZConversationService extends ChangeNotifier {
 
   /// 初始化会话服务
   Future<void> initialize() async {
-    // 桌面端：完全跳过 ConversationService 的原生调用
     if (_isDesktopPlatform) {
-      _log('桌面端平台，跳过 ConversationService 原生调用（NIM PC SDK 不支持）');
+      // ═══ 桌面端：本地会话管理模式 ═══
+      _log('桌面端平台，使用本地会话管理模式');
+      _isLoading = true;
+      notifyListeners();
+
+      // 从本地存储恢复会话列表
+      await _loadLocalConversations();
+
+      // 注册 MessageService 监听，自动更新本地会话
+      _setupDesktopMessageListener();
+
       _isLoading = false;
       notifyListeners();
       return;
     }
 
+    // ═══ 移动端：正常使用 NIM SDK ═══
     final imService = IMService.instance;
 
     if (!imService.isInitialized || !imService.isLoggedIn) {
@@ -149,7 +232,7 @@ class TZConversationService extends ChangeNotifier {
     await _refreshTotalUnread();
   }
 
-  /// 注册会话变化监听（使用 Stream 方式）
+  /// 注册会话变化监听（使用 Stream 方式）— 移动端专用
   void _setupListeners() {
     if (_listenerRegistered) return;
     if (_isDesktopPlatform) return;
@@ -193,13 +276,209 @@ class TZConversationService extends ChangeNotifier {
   }
 
   // ═══════════════════════════════════════════════════════
+  // 桌面端：本地会话管理
+  // ═══════════════════════════════════════════════════════
+
+  /// 注册桌面端消息监听（通过 MessageService 自动创建/更新本地会话）
+  void _setupDesktopMessageListener() {
+    if (!_isDesktopPlatform) return;
+    if (_desktopMessageSub != null) return; // 避免重复注册
+
+    if (!_isIMLoggedIn) {
+      _log('桌面端 IM 未登录，跳过消息监听注册');
+      return;
+    }
+
+    try {
+      final msgService = NimCore.instance.messageService;
+      _desktopMessageSub = msgService.onReceiveMessages.listen((messages) {
+        _log('桌面端收到新消息: ${messages.length} 条');
+        for (final msg in messages) {
+          _handleDesktopNewMessage(msg);
+        }
+      });
+      _log('桌面端消息监听注册成功');
+    } catch (e) {
+      _log('桌面端消息监听注册失败: $e');
+    }
+  }
+
+  /// 处理桌面端新消息（自动创建/更新本地会话）
+  void _handleDesktopNewMessage(NIMMessage msg) {
+    final conversationId = msg.conversationId ?? '';
+    if (conversationId.isEmpty) return;
+
+    final senderAccid = msg.senderId ?? '';
+    final text = msg.text ?? '[消息]';
+    final timestamp = msg.createTime != null
+        ? DateTime.fromMillisecondsSinceEpoch(msg.createTime!)
+        : DateTime.now();
+
+    // 查找已有会话
+    final existingIndex = _conversations.indexWhere(
+      (c) => c.conversationId == conversationId,
+    );
+
+    if (existingIndex >= 0) {
+      // 更新已有会话
+      final existing = _conversations[existingIndex];
+      _conversations[existingIndex] = existing.copyWith(
+        lastMessage: _getMessageTypeText(msg),
+        lastMessageTime: timestamp,
+        unreadCount: existing.unreadCount + 1,
+      );
+    } else {
+      // 创建新的本地会话
+      final type = _guessConversationType(conversationId);
+      final targetId = _extractTargetId(conversationId);
+
+      _conversations.add(TZConversation(
+        conversationId: conversationId,
+        type: type,
+        targetId: targetId,
+        name: senderAccid, // 先用 accid，后续可通过 UserInfoService 更新
+        lastMessage: _getMessageTypeText(msg),
+        lastMessageTime: timestamp,
+        unreadCount: 1,
+      ));
+    }
+
+    _sortAndNotify();
+    _saveLocalConversations();
+    _recalculateUnread();
+  }
+
+  /// 从消息中获取类型文本
+  String _getMessageTypeText(NIMMessage msg) {
+    switch (msg.messageType) {
+      case NIMMessageType.text:
+        return msg.text ?? '';
+      case NIMMessageType.image:
+        return '[图片]';
+      case NIMMessageType.audio:
+        return '[语音]';
+      case NIMMessageType.video:
+        return '[视频]';
+      case NIMMessageType.file:
+        return '[文件]';
+      case NIMMessageType.location:
+        return '[位置]';
+      case NIMMessageType.notification:
+        return '[通知]';
+      case NIMMessageType.tip:
+        return '[提示]';
+      case NIMMessageType.custom:
+        return '[自定义消息]';
+      default:
+        return '[消息]';
+    }
+  }
+
+  /// 从 conversationId 猜测会话类型
+  NIMConversationType _guessConversationType(String conversationId) {
+    // conversationId 格式: {appId}|{type}|{targetId}
+    // type: 1=P2P, 2=Team, 3=SuperTeam
+    final parts = conversationId.split('|');
+    if (parts.length >= 2) {
+      switch (parts[1]) {
+        case '1':
+          return NIMConversationType.p2p;
+        case '2':
+          return NIMConversationType.team;
+        case '3':
+          return NIMConversationType.superTeam;
+      }
+    }
+    return NIMConversationType.p2p;
+  }
+
+  /// 手动添加/更新本地会话（桌面端发起新聊天时调用）
+  Future<void> addOrUpdateLocalConversation({
+    required String conversationId,
+    required NIMConversationType type,
+    required String targetId,
+    String name = '',
+    String avatar = '',
+    String lastMessage = '',
+  }) async {
+    final existingIndex = _conversations.indexWhere(
+      (c) => c.conversationId == conversationId,
+    );
+
+    if (existingIndex >= 0) {
+      // 更新已有会话的名称和头像（如果提供了新值）
+      final existing = _conversations[existingIndex];
+      _conversations[existingIndex] = existing.copyWith(
+        name: name.isNotEmpty ? name : null,
+        avatar: avatar.isNotEmpty ? avatar : null,
+        lastMessage: lastMessage.isNotEmpty ? lastMessage : null,
+        lastMessageTime: DateTime.now(),
+      );
+    } else {
+      // 创建新会话
+      _conversations.add(TZConversation(
+        conversationId: conversationId,
+        type: type,
+        targetId: targetId,
+        name: name,
+        avatar: avatar,
+        lastMessage: lastMessage,
+        lastMessageTime: DateTime.now(),
+      ));
+    }
+
+    _sortAndNotify();
+    await _saveLocalConversations();
+    _log('本地会话已添加/更新: $conversationId ($name)');
+  }
+
+  /// 从本地存储加载会话列表
+  Future<void> _loadLocalConversations() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final jsonStr = prefs.getString(_localConversationsKey);
+      if (jsonStr != null && jsonStr.isNotEmpty) {
+        final List<dynamic> jsonList = jsonDecode(jsonStr);
+        _conversations = jsonList
+            .map((j) => TZConversation.fromJson(j as Map<String, dynamic>))
+            .toList();
+        _sortAndNotify();
+        _recalculateUnread();
+        _log('从本地恢复 ${_conversations.length} 条会话');
+      } else {
+        _log('本地无缓存会话');
+      }
+    } catch (e) {
+      _log('加载本地会话异常: $e');
+    }
+  }
+
+  /// 保存会话列表到本地存储
+  Future<void> _saveLocalConversations() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final jsonStr = jsonEncode(_conversations.map((c) => c.toJson()).toList());
+      await prefs.setString(_localConversationsKey, jsonStr);
+    } catch (e) {
+      _log('保存本地会话异常: $e');
+    }
+  }
+
+  /// 重新计算总未读数（桌面端本地计算）
+  void _recalculateUnread() {
+    _totalUnreadCount = _conversations.fold(0, (sum, c) => sum + c.unreadCount);
+    _unreadController.add(_totalUnreadCount);
+  }
+
+  // ═══════════════════════════════════════════════════════
   // 会话列表操作
   // ═══════════════════════════════════════════════════════
 
-  /// 加载会话列表
+  /// 加载会话列表（移动端从 SDK 加载）
   Future<void> loadConversations() async {
     if (_isDesktopPlatform) {
-      _log('桌面端平台，跳过 getConversationList 调用');
+      // 桌面端从本地加载
+      await _loadLocalConversations();
       return;
     }
     if (!_isIMReady) {
@@ -234,7 +513,21 @@ class TZConversationService extends ChangeNotifier {
 
   /// 置顶/取消置顶会话
   Future<bool> toggleStickTop(String conversationId) async {
-    if (_isDesktopPlatform || !_isIMReady) return false;
+    if (_isDesktopPlatform) {
+      // 桌面端本地置顶
+      final index = _conversations.indexWhere((c) => c.conversationId == conversationId);
+      if (index >= 0) {
+        _conversations[index] = _conversations[index].copyWith(
+          isStickTop: !_conversations[index].isStickTop,
+        );
+        _sortAndNotify();
+        await _saveLocalConversations();
+        return true;
+      }
+      return false;
+    }
+
+    if (!_isIMReady) return false;
 
     try {
       final conv = _conversations.firstWhere(
@@ -258,7 +551,17 @@ class TZConversationService extends ChangeNotifier {
 
   /// 删除会话
   Future<bool> deleteConversation(String conversationId) async {
-    if (_isDesktopPlatform || !_isIMReady) return false;
+    if (_isDesktopPlatform) {
+      // 桌面端本地删除
+      _conversations.removeWhere((c) => c.conversationId == conversationId);
+      _sortAndNotify();
+      _recalculateUnread();
+      await _saveLocalConversations();
+      _log('本地删除会话: $conversationId');
+      return true;
+    }
+
+    if (!_isIMReady) return false;
 
     try {
       final result = await NimCore.instance.conversationService
@@ -279,7 +582,19 @@ class TZConversationService extends ChangeNotifier {
 
   /// 标记会话已读
   Future<void> markConversationRead(String conversationId) async {
-    if (_isDesktopPlatform || !_isIMReady) return;
+    if (_isDesktopPlatform) {
+      // 桌面端本地标记已读
+      final index = _conversations.indexWhere((c) => c.conversationId == conversationId);
+      if (index >= 0 && _conversations[index].unreadCount > 0) {
+        _conversations[index] = _conversations[index].copyWith(unreadCount: 0);
+        _recalculateUnread();
+        notifyListeners();
+        await _saveLocalConversations();
+      }
+      return;
+    }
+
+    if (!_isIMReady) return;
 
     try {
       await NimCore.instance.conversationService
@@ -313,7 +628,7 @@ class TZConversationService extends ChangeNotifier {
   // 内部方法
   // ═══════════════════════════════════════════════════════
 
-  /// 将云信会话转换为业务模型
+  /// 将云信会话转换为业务模型（移动端专用）
   TZConversation _convertToTZConversation(NIMConversation conv) {
     // 提取最后一条消息的文本摘要
     String lastMsg = '';
@@ -351,7 +666,7 @@ class TZConversationService extends ChangeNotifier {
     return parts.length >= 3 ? parts[2] : conversationId;
   }
 
-  /// 获取消息摘要文本
+  /// 获取消息摘要文本（移动端 NIMLastMessage）
   String _getMessageSummary(NIMLastMessage lastMessage) {
     switch (lastMessage.messageType) {
       case NIMMessageType.text:
@@ -377,7 +692,7 @@ class TZConversationService extends ChangeNotifier {
     }
   }
 
-  /// 更新或插入会话
+  /// 更新或插入会话（移动端 NIM SDK 回调）
   void _upsertConversation(NIMConversation nimConv) {
     final tzConv = _convertToTZConversation(nimConv);
     final index = _conversations.indexWhere(
@@ -407,9 +722,13 @@ class TZConversationService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 刷新总未读数
+  /// 刷新总未读数（移动端从 SDK 获取）
   Future<void> _refreshTotalUnread() async {
-    if (_isDesktopPlatform || !_isIMReady) return;
+    if (_isDesktopPlatform) {
+      _recalculateUnread();
+      return;
+    }
+    if (!_isIMReady) return;
 
     try {
       final result =
@@ -433,10 +752,12 @@ class TZConversationService extends ChangeNotifier {
     _convCreatedSub?.cancel();
     _convDeletedSub?.cancel();
     _totalUnreadSub?.cancel();
+    _desktopMessageSub?.cancel();
     _convChangedSub = null;
     _convCreatedSub = null;
     _convDeletedSub = null;
     _totalUnreadSub = null;
+    _desktopMessageSub = null;
     notifyListeners();
   }
 
@@ -451,6 +772,7 @@ class TZConversationService extends ChangeNotifier {
     _convCreatedSub?.cancel();
     _convDeletedSub?.cancel();
     _totalUnreadSub?.cancel();
+    _desktopMessageSub?.cancel();
     _conversationsController.close();
     _unreadController.close();
     super.dispose();
