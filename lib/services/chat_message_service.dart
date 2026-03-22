@@ -2,11 +2,13 @@
 /// 火鹰科技出品
 ///
 /// 职责：
-/// 1. 发送消息（文本/图片/语音/自定义）
+/// 1. 发送消息（文本/图片/语音/视频/文件/自定义）
 /// 2. 接收消息（实时监听）
 /// 3. 查询历史消息
 /// 4. 消息撤回、已读回执
-/// 5. 将云信 NIMMessage 转换为业务模型
+/// 5. 消息删除、转发
+/// 6. 本地消息搜索
+/// 7. 将云信 NIMMessage 转换为业务模型
 ///
 /// 安全机制：
 /// - 所有 NIM SDK 调用前都检查 IM 初始化和登录状态
@@ -20,6 +22,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:nim_core_v2/nim_core.dart';
 import '../config/im_config.dart';
 import 'im_service.dart';
@@ -38,8 +41,14 @@ class TZMessage {
   final String? audioUrl;
   final int? audioDuration; // 语音时长（秒）
   final String? videoUrl;
+  final String? videoCoverUrl; // 视频封面
+  final int? videoDuration; // 视频时长（秒）
   final String? fileUrl;
   final String? fileName;
+  final int? fileSize; // 文件大小（字节）
+  final double? latitude;
+  final double? longitude;
+  final String? locationTitle;
   final Map<String, dynamic>? customData;
   final DateTime timestamp;
   final TZMessageStatus status;
@@ -60,8 +69,14 @@ class TZMessage {
     this.audioUrl,
     this.audioDuration,
     this.videoUrl,
+    this.videoCoverUrl,
+    this.videoDuration,
     this.fileUrl,
     this.fileName,
+    this.fileSize,
+    this.latitude,
+    this.longitude,
+    this.locationTitle,
     this.customData,
     required this.timestamp,
     this.status = TZMessageStatus.success,
@@ -122,10 +137,18 @@ class ChatMessageService extends ChangeNotifier {
   Stream<({String messageId, int progress})> get progressStream =>
       _progressController.stream;
 
+  /// 消息状态变化流（发送成功/失败）
+  final StreamController<({String messageId, TZMessageStatus status})>
+      _statusController =
+      StreamController<({String messageId, TZMessageStatus status})>.broadcast();
+  Stream<({String messageId, TZMessageStatus status})> get statusStream =>
+      _statusController.stream;
+
   bool _listenerRegistered = false;
   StreamSubscription<List<NIMMessage>>? _receiveMessageSub;
   StreamSubscription<List<NIMMessageRevokeNotification>>? _revokeSub;
   StreamSubscription<List<NIMP2PMessageReadReceipt>>? _p2pReceiptSub;
+  StreamSubscription<List<NIMTeamMessageReadReceipt>>? _teamReceiptSub;
 
   // ═══════════════════════════════════════════════════════
   // 安全检查
@@ -167,7 +190,7 @@ class ChatMessageService extends ChangeNotifier {
     if (!_isIMConnected) return;
 
     _listenerRegistered = true;
-    _log('✅ 消息监听注册成功！accid: ${IMService.instance.currentAccid}');
+    _log('消息监听注册成功！accid: ${IMService.instance.currentAccid}');
 
     final msgService = NimCore.instance.messageService;
 
@@ -175,14 +198,13 @@ class ChatMessageService extends ChangeNotifier {
     _receiveMessageSub = msgService.onReceiveMessages.listen((messages) {
       _log('收到新消息: ${messages.length} 条');
       for (final m in messages) {
-        _log('  → from: ${m.senderId}, convId: ${m.conversationId}, text: ${m.text}');
+        _log('  → from: ${m.senderId}, convId: ${m.conversationId}, type: ${m.messageType}');
       }
       final tzMessages =
           messages.map((m) => _convertToTZMessage(m)).toList();
       _messageController.add(tzMessages);
 
       // ═══ 关键修复：收到新消息时自动更新会话列表 ═══
-      // 无论桌面端还是移动端，都通过 addOrUpdateLocalConversation 确保会话列表更新
       for (final msg in messages) {
         _autoUpdateConversation(msg);
       }
@@ -204,6 +226,12 @@ class ChatMessageService extends ChangeNotifier {
         msgService.onReceiveP2PMessageReadReceipts.listen((receipts) {
       _log('P2P 已读回执: ${receipts.length} 条');
     });
+
+    // 群已读回执
+    _teamReceiptSub =
+        msgService.onReceiveTeamMessageReadReceipts.listen((receipts) {
+      _log('群已读回执: ${receipts.length} 条');
+    });
   }
 
   // ═══════════════════════════════════════════════════════
@@ -223,7 +251,6 @@ class ChatMessageService extends ChangeNotifier {
     try {
       _log('发送文本消息到: $conversationId');
 
-      // 使用 MessageCreator 创建文本消息
       final createResult = await MessageCreator.createTextMessage(text);
 
       if (!createResult.isSuccess || createResult.data == null) {
@@ -233,7 +260,6 @@ class ChatMessageService extends ChangeNotifier {
 
       final message = createResult.data!;
 
-      // 发送消息
       final sendResult = await NimCore.instance.messageService.sendMessage(
         message: message,
         conversationId: conversationId,
@@ -352,13 +378,157 @@ class ChatMessageService extends ChangeNotifier {
     }
   }
 
+  /// 发送视频消息
+  Future<TZMessage?> sendVideoMessage(
+    String conversationId,
+    String videoPath, {
+    int duration = 0,
+    int width = 0,
+    int height = 0,
+  }) async {
+    if (!_isIMConnected) {
+      _log('IM 未就绪，无法发送视频消息');
+      return null;
+    }
+
+    try {
+      _log('发送视频消息到: $conversationId');
+
+      final createResult = await MessageCreator.createVideoMessage(
+        videoPath,
+        null, // name
+        null, // sceneName
+        duration,
+        width,
+        height,
+      );
+
+      if (!createResult.isSuccess || createResult.data == null) {
+        _log('创建视频消息失败: ${createResult.errorDetails}');
+        return null;
+      }
+
+      final message = createResult.data!;
+
+      final sendResult = await NimCore.instance.messageService.sendMessage(
+        message: message,
+        conversationId: conversationId,
+        params: NIMSendMessageParams(),
+      );
+
+      if (sendResult.isSuccess && sendResult.data?.message != null) {
+        _log('视频消息发送成功');
+        return _convertToTZMessage(sendResult.data!.message!);
+      } else {
+        _log('视频消息发送失败: ${sendResult.errorDetails}');
+        return null;
+      }
+    } catch (e) {
+      _log('发送视频消息异常: $e');
+      return null;
+    }
+  }
+
+  /// 发送文件消息
+  Future<TZMessage?> sendFileMessage(
+    String conversationId,
+    String filePath, {
+    String? displayName,
+  }) async {
+    if (!_isIMConnected) {
+      _log('IM 未就绪，无法发送文件消息');
+      return null;
+    }
+
+    try {
+      _log('发送文件消息到: $conversationId');
+
+      final createResult = await MessageCreator.createFileMessage(
+        filePath,
+        displayName, // name
+        null, // sceneName
+      );
+
+      if (!createResult.isSuccess || createResult.data == null) {
+        _log('创建文件消息失败: ${createResult.errorDetails}');
+        return null;
+      }
+
+      final message = createResult.data!;
+
+      final sendResult = await NimCore.instance.messageService.sendMessage(
+        message: message,
+        conversationId: conversationId,
+        params: NIMSendMessageParams(),
+      );
+
+      if (sendResult.isSuccess && sendResult.data?.message != null) {
+        _log('文件消息发送成功');
+        return _convertToTZMessage(sendResult.data!.message!);
+      } else {
+        _log('文件消息发送失败: ${sendResult.errorDetails}');
+        return null;
+      }
+    } catch (e) {
+      _log('发送文件消息异常: $e');
+      return null;
+    }
+  }
+
+  /// 发送位置消息
+  Future<TZMessage?> sendLocationMessage(
+    String conversationId, {
+    required double latitude,
+    required double longitude,
+    required String address,
+  }) async {
+    if (!_isIMConnected) {
+      _log('IM 未就绪，无法发送位置消息');
+      return null;
+    }
+
+    try {
+      _log('发送位置消息到: $conversationId');
+
+      final createResult = await MessageCreator.createLocationMessage(
+        latitude,
+        longitude,
+        address,
+      );
+
+      if (!createResult.isSuccess || createResult.data == null) {
+        _log('创建位置消息失败: ${createResult.errorDetails}');
+        return null;
+      }
+
+      final message = createResult.data!;
+
+      final sendResult = await NimCore.instance.messageService.sendMessage(
+        message: message,
+        conversationId: conversationId,
+        params: NIMSendMessageParams(),
+      );
+
+      if (sendResult.isSuccess && sendResult.data?.message != null) {
+        _log('位置消息发送成功');
+        return _convertToTZMessage(sendResult.data!.message!);
+      } else {
+        _log('位置消息发送失败: ${sendResult.errorDetails}');
+        return null;
+      }
+    } catch (e) {
+      _log('发送位置消息异常: $e');
+      return null;
+    }
+  }
+
   /// 发送自定义消息（用于业务扩展，如作业提交、AI评分等）
   Future<TZMessage?> sendCustomMessage(
     String conversationId,
     Map<String, dynamic> data,
   ) async {
     if (!_isIMConnected) {
-      _log('IM 未就绪，无法发送文件消息');;
+      _log('IM 未就绪，无法发送自定义消息');
       return null;
     }
 
@@ -393,6 +563,47 @@ class ChatMessageService extends ChangeNotifier {
       }
     } catch (e) {
       _log('发送自定义消息异常: $e');
+      return null;
+    }
+  }
+
+  /// 转发消息到指定会话
+  Future<TZMessage?> forwardMessage(
+    NIMMessage message,
+    String toConversationId,
+  ) async {
+    if (!_isIMConnected) {
+      _log('IM 未就绪，无法转发消息');
+      return null;
+    }
+
+    try {
+      _log('转发消息到: $toConversationId');
+
+      final createResult = await MessageCreator.createForwardMessage(message);
+
+      if (!createResult.isSuccess || createResult.data == null) {
+        _log('创建转发消息失败: ${createResult.errorDetails}');
+        return null;
+      }
+
+      final forwardMsg = createResult.data!;
+
+      final sendResult = await NimCore.instance.messageService.sendMessage(
+        message: forwardMsg,
+        conversationId: toConversationId,
+        params: NIMSendMessageParams(),
+      );
+
+      if (sendResult.isSuccess && sendResult.data?.message != null) {
+        _log('消息转发成功');
+        return _convertToTZMessage(sendResult.data!.message!);
+      } else {
+        _log('消息转发失败: ${sendResult.errorDetails}');
+        return null;
+      }
+    } catch (e) {
+      _log('转发消息异常: $e');
       return null;
     }
   }
@@ -446,6 +657,26 @@ class ChatMessageService extends ChangeNotifier {
     }
   }
 
+  /// 根据消息 ID 列表获取消息
+  Future<List<TZMessage>> getMessagesByIds(
+    List<NIMMessageRefer> messageRefers,
+  ) async {
+    if (!_isIMConnected) return [];
+
+    try {
+      final result = await NimCore.instance.messageService
+          .getMessageListByIds(messageRefers: messageRefers);
+
+      if (result.isSuccess && result.data != null) {
+        return result.data!.map((m) => _convertToTZMessage(m)).toList();
+      }
+      return [];
+    } catch (e) {
+      _log('根据 ID 查询消息异常: $e');
+      return [];
+    }
+  }
+
   // ═══════════════════════════════════════════════════════
   // 消息操作
   // ═══════════════════════════════════════════════════════
@@ -462,9 +693,73 @@ class ChatMessageService extends ChangeNotifier {
         _log('消息撤回成功: ${message.messageClientId}');
         return true;
       }
+      _log('消息撤回失败: ${result.errorDetails}');
       return false;
     } catch (e) {
       _log('消息撤回异常: $e');
+      return false;
+    }
+  }
+
+  /// 删除本地消息
+  Future<bool> deleteMessage(NIMMessage message) async {
+    if (!_isIMConnected) return false;
+
+    try {
+      final result = await NimCore.instance.messageService
+          .deleteMessage(message: message);
+
+      if (result.isSuccess) {
+        _log('消息删除成功: ${message.messageClientId}');
+        return true;
+      }
+      _log('消息删除失败: ${result.errorDetails}');
+      return false;
+    } catch (e) {
+      _log('消息删除异常: $e');
+      return false;
+    }
+  }
+
+  /// 批量删除消息
+  Future<bool> deleteMessages(List<NIMMessage> messages) async {
+    if (!_isIMConnected || messages.isEmpty) return false;
+
+    try {
+      final result = await NimCore.instance.messageService
+          .deleteMessages(messages: messages);
+
+      if (result.isSuccess) {
+        _log('批量删除消息成功: ${messages.length} 条');
+        return true;
+      }
+      _log('批量删除消息失败: ${result.errorDetails}');
+      return false;
+    } catch (e) {
+      _log('批量删除消息异常: $e');
+      return false;
+    }
+  }
+
+  /// 清空会话历史消息
+  Future<bool> clearHistoryMessage(String conversationId) async {
+    if (!_isIMConnected) return false;
+
+    try {
+      final result = await NimCore.instance.messageService
+          .clearHistoryMessage(
+        conversationId: conversationId,
+        deleteRoam: true,
+      );
+
+      if (result.isSuccess) {
+        _log('清空历史消息成功: $conversationId');
+        return true;
+      }
+      _log('清空历史消息失败: ${result.errorDetails}');
+      return false;
+    } catch (e) {
+      _log('清空历史消息异常: $e');
       return false;
     }
   }
@@ -491,6 +786,81 @@ class ChatMessageService extends ChangeNotifier {
     }
   }
 
+  /// 查询 P2P 已读回执
+  Future<bool> isPeerRead(String conversationId) async {
+    if (!_isIMConnected) return false;
+    try {
+      final result = await NimCore.instance.messageService
+          .getP2PMessageReceipt(conversationId: conversationId);
+      if (result.isSuccess && result.data != null) {
+        return true;
+      }
+      return false;
+    } catch (e) {
+      _log('查询 P2P 已读回执异常: $e');
+      return false;
+    }
+  }
+
+  /// 复制消息文本到剪贴板
+  Future<void> copyMessageText(TZMessage message) async {
+    String text = '';
+    switch (message.type) {
+      case TZMessageType.text:
+        text = message.text;
+        break;
+      case TZMessageType.image:
+        text = message.imageUrl ?? '';
+        break;
+      default:
+        text = _getMessagePreview(message.raw!);
+        break;
+    }
+    if (text.isNotEmpty) {
+      await Clipboard.setData(ClipboardData(text: text));
+      _log('消息文本已复制到剪贴板');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 本地消息搜索
+  // ═══════════════════════════════════════════════════════
+
+  /// 在指定会话中搜索消息
+  Future<List<TZMessage>> searchLocalMessages(
+    String conversationId,
+    String keyword, {
+    int limit = 50,
+  }) async {
+    if (!_isIMConnected || keyword.isEmpty) return [];
+
+    try {
+      _log('搜索本地消息: $conversationId, keyword: $keyword');
+
+      final option = NIMMessageSearchParams(
+        keyword: keyword,
+        conversationId: conversationId,
+        messageLimit: limit,
+        sortOrder: NIMSortOrder.desc,
+      );
+
+      final result = await NimCore.instance.messageService
+          .searchLocalMessages(option: option);
+
+      if (result.isSuccess && result.data != null) {
+        final messages = result.data!
+            .map((m) => _convertToTZMessage(m))
+            .toList();
+        _log('搜索到 ${messages.length} 条消息');
+        return messages;
+      }
+      return [];
+    } catch (e) {
+      _log('搜索本地消息异常: $e');
+      return [];
+    }
+  }
+
   // ═══════════════════════════════════════════════════════
   // 重置
   // ═══════════════════════════════════════════════════════
@@ -501,9 +871,11 @@ class ChatMessageService extends ChangeNotifier {
     _receiveMessageSub?.cancel();
     _revokeSub?.cancel();
     _p2pReceiptSub?.cancel();
+    _teamReceiptSub?.cancel();
     _receiveMessageSub = null;
     _revokeSub = null;
     _p2pReceiptSub = null;
+    _teamReceiptSub = null;
   }
 
   // ═══════════════════════════════════════════════════════
@@ -528,9 +900,17 @@ class ChatMessageService extends ChangeNotifier {
       videoUrl: msg.messageType == NIMMessageType.video
           ? _extractFileUrl(msg)
           : null,
+      videoCoverUrl: _extractVideoCoverUrl(msg),
+      videoDuration: _extractVideoDuration(msg),
       fileUrl: msg.messageType == NIMMessageType.file
           ? _extractFileUrl(msg)
           : null,
+      fileName: _extractFileName(msg),
+      fileSize: _extractFileSize(msg),
+      latitude: _extractLatitude(msg),
+      longitude: _extractLongitude(msg),
+      locationTitle: _extractLocationTitle(msg),
+      customData: _extractCustomData(msg),
       timestamp: DateTime.fromMillisecondsSinceEpoch(msg.createTime ?? 0),
       status: _convertMessageStatus(msg),
       isRevoked: false,
@@ -603,8 +983,83 @@ class ChatMessageService extends ChangeNotifier {
     return null;
   }
 
+  /// 提取视频封面 URL
+  String? _extractVideoCoverUrl(NIMMessage msg) {
+    final attachment = msg.attachment;
+    if (attachment is NIMMessageVideoAttachment) {
+      return attachment.url; // SDK 自动生成封面
+    }
+    return null;
+  }
+
+  /// 提取视频时长
+  int? _extractVideoDuration(NIMMessage msg) {
+    final attachment = msg.attachment;
+    if (attachment is NIMMessageVideoAttachment) {
+      return attachment.duration;
+    }
+    return null;
+  }
+
+  /// 提取文件名
+  String? _extractFileName(NIMMessage msg) {
+    final attachment = msg.attachment;
+    if (attachment is NIMMessageFileAttachment) {
+      return attachment.name;
+    }
+    return null;
+  }
+
+  /// 提取文件大小
+  int? _extractFileSize(NIMMessage msg) {
+    final attachment = msg.attachment;
+    if (attachment is NIMMessageFileAttachment) {
+      return attachment.size;
+    }
+    return null;
+  }
+
+  /// 提取位置信息
+  double? _extractLatitude(NIMMessage msg) {
+    final attachment = msg.attachment;
+    if (attachment is NIMMessageLocationAttachment) {
+      return attachment.latitude;
+    }
+    return null;
+  }
+
+  double? _extractLongitude(NIMMessage msg) {
+    final attachment = msg.attachment;
+    if (attachment is NIMMessageLocationAttachment) {
+      return attachment.longitude;
+    }
+    return null;
+  }
+
+  String? _extractLocationTitle(NIMMessage msg) {
+    final attachment = msg.attachment;
+    if (attachment is NIMMessageLocationAttachment) {
+      return attachment.address;
+    }
+    return null;
+  }
+
+  /// 提取自定义消息数据
+  Map<String, dynamic>? _extractCustomData(NIMMessage msg) {
+    if (msg.messageType != NIMMessageType.custom) return null;
+    final attachment = msg.attachment;
+    if (attachment is NIMMessageCustomAttachment) {
+      try {
+        final raw = attachment.rawAttachment;
+        if (raw != null && raw.isNotEmpty) {
+          return jsonDecode(raw) as Map<String, dynamic>;
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
   /// 收到新消息时自动更新会话列表
-  /// 确保无论桌面端还是移动端，收到消息后会话列表都能自动出现
   void _autoUpdateConversation(NIMMessage msg) {
     try {
       final conversationId = msg.conversationId ?? '';
@@ -679,9 +1134,11 @@ class ChatMessageService extends ChangeNotifier {
     _receiveMessageSub?.cancel();
     _revokeSub?.cancel();
     _p2pReceiptSub?.cancel();
+    _teamReceiptSub?.cancel();
     _messageController.close();
     _revokeController.close();
     _progressController.close();
+    _statusController.close();
     super.dispose();
   }
 }

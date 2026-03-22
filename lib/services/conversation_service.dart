@@ -766,6 +766,86 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// 切换会话免打扰
+  /// 使用网易云信 V2 SDK 的 settingService 设置免打扰
+  /// P2P 会话使用 setP2PMessageMuteMode
+  /// 群聊会话使用 setTeamMessageMuteMode
+  Future<bool> toggleMute(String conversationId) async {
+    if (_isDesktopPlatform) {
+      final index = _conversations.indexWhere((c) => c.conversationId == conversationId);
+      if (index >= 0) {
+        final current = _conversations[index];
+        _conversations[index] = current.copyWith(isMuted: !current.isMuted);
+        _sortAndNotify();
+        await _saveLocalConversations();
+        return true;
+      }
+      return false;
+    }
+
+    if (!_isIMReady) return false;
+
+    try {
+      final index = _conversations.indexWhere((c) => c.conversationId == conversationId);
+      if (index < 0) return false;
+
+      final conv = _conversations[index];
+      final currentMuted = conv.isMuted;
+      final targetId = conv.targetId;
+
+      if (conv.type == NIMConversationType.p2p) {
+        // 单聊免打扰
+        final result = await NimCore.instance.settingService
+            .setP2PMessageMuteMode(
+              targetId,
+              currentMuted
+                  ? V2NIMP2PMessageMuteMode.v2NIM_P2P_MESSAGE_MUTE_MODE_OFF
+                  : V2NIMP2PMessageMuteMode.v2NIM_P2P_MESSAGE_MUTE_MODE_ON,
+            );
+        if (result.isSuccess) {
+          _conversations[index] = conv.copyWith(isMuted: !currentMuted);
+          _sortAndNotify();
+          await _saveLocalConversations();
+          _log('切换单聊免打扰成功: $conversationId -> ${!currentMuted}');
+          return true;
+        }
+      } else {
+        // 群聊免打扰
+        final result = await NimCore.instance.settingService
+            .setTeamMessageMuteMode(
+              targetId,
+              conv.type == NIMConversationType.superTeam
+                  ? NIMTeamType.superTeam
+                  : NIMTeamType.normalTeam,
+              currentMuted
+                  ? NIMTeamMessageMuteMode.v2NIM_TEAM_MESSAGE_MUTE_MODE_OFF
+                  : NIMTeamMessageMuteMode.v2NIM_TEAM_MESSAGE_MUTE_MODE_ON,
+            );
+        if (result.isSuccess) {
+          _conversations[index] = conv.copyWith(isMuted: !currentMuted);
+          _sortAndNotify();
+          await _saveLocalConversations();
+          _log('切换群聊免打扰成功: $conversationId -> ${!currentMuted}');
+          return true;
+        }
+      }
+      return false;
+    } catch (e) {
+      _log('切换免打扰异常: $e');
+      // 回退到本地标记
+      final index = _conversations.indexWhere((c) => c.conversationId == conversationId);
+      if (index >= 0) {
+        final current = _conversations[index];
+        _conversations[index] = current.copyWith(isMuted: !current.isMuted);
+        _sortAndNotify();
+        await _saveLocalConversations();
+        _log('免打扰回退到本地标记');
+        return true;
+      }
+      return false;
+    }
+  }
+
   // ═══════════════════════════════════════════════════════
   // 搜索
   // ═══════════════════════════════════════════════════════

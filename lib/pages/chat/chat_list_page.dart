@@ -38,9 +38,8 @@ class _ChatListPageState extends State<ChatListPage> {
   final TextEditingController _searchController = TextEditingController();
 
   /// 是否使用真实 IM 数据
-  /// 移动端：IM 已登录即可
-  /// 桌面端：IM 已登录即可（使用本地会话管理模式）
-  bool get _useRealIM => context.read<IMService>().isLoggedIn;
+  /// 业务已登录即显示 IM 会话列表（避免 IM 异步登录时闪现 Mock 数据）
+  bool get _useRealIM => context.read<AuthService>().isLoggedIn;
 
   // ═══════════════════════════════════════════════════════
   // Mock 数据模式（未登录 IM 时使用）
@@ -539,6 +538,7 @@ class _ChatListPageState extends State<ChatListPage> {
   }
 
   Widget _buildChatListContent() {
+    final authService = context.watch<AuthService>();
     final imService = context.watch<IMService>();
     final convService = context.watch<TZConversationService>();
 
@@ -549,8 +549,8 @@ class _ChatListPageState extends State<ChatListPage> {
         _buildFilterTabs(),
         const SizedBox(height: 8),
 
-        // 根据 IM 登录状态决定数据来源
-        if (imService.isLoggedIn) ...[
+        // 根据业务登录状态决定数据来源（避免 IM 异步登录时闪现 Mock 数据）
+        if (authService.isLoggedIn) ...[
           // ═══ 真实 IM 会话列表（移动端从 SDK，桌面端从本地缓存） ═══
           if (convService.isLoading)
             const Padding(
@@ -568,8 +568,8 @@ class _ChatListPageState extends State<ChatListPage> {
                 child: _buildIMConversationCard(conv, isSelected),
               );
             }),
-        ] else ...[
-          // ═══ Mock 数据（演示模式） ═══
+        ] else if (!authService.isLoggedIn) ...[
+          // ═══ Mock 数据（未登录时的演示模式） ═══
           if (_filteredMockChats.isEmpty)
             _buildEmptyList()
           else
@@ -789,6 +789,18 @@ class _ChatListPageState extends State<ChatListPage> {
                     TZConversationService.instance.markConversationRead(conv.conversationId);
                   },
                 ),
+              // 免打扰
+              ListTile(
+                leading: Icon(
+                  conv.isMuted ? Icons.notifications_active : Icons.notifications_off_outlined,
+                  color: const Color(0xFFF59E0B),
+                ),
+                title: Text(conv.isMuted ? '取消免打扰' : '消息免打扰'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  TZConversationService.instance.toggleMute(conv.conversationId);
+                },
+              ),
               // 删除会话
               ListTile(
                 leading: const Icon(Icons.delete_outline, color: Color(0xFFEF4444)),
