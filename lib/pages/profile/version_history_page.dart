@@ -33,7 +33,7 @@ class _VersionHistoryPageState extends State<VersionHistoryPage> {
 
   Future<void> _loadVersions() async {
     final auth = context.read<AuthService>();
-    await _versionService.initialize(authToken: auth.accessToken);
+    await _versionService.initialize(authToken: auth.bizToken);
     if (mounted) setState(() {});
   }
 
@@ -558,14 +558,14 @@ class _VersionHistoryPageState extends State<VersionHistoryPage> {
 
   Future<void> _syncToBackend() async {
     final auth = context.read<AuthService>();
-    if (auth.accessToken == null) {
+    if (auth.bizToken == null) {
       _showSnackBar('请先登录', isError: true);
       return;
     }
 
     setState(() => _isSyncing = true);
 
-    final success = await _versionService.syncToBackend(auth.accessToken!);
+    final success = await _versionService.syncToBackend(auth.bizToken!);
 
     setState(() => _isSyncing = false);
 

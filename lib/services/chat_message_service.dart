@@ -1047,15 +1047,21 @@ class ChatMessageService extends ChangeNotifier {
   /// 提取自定义消息数据
   Map<String, dynamic>? _extractCustomData(NIMMessage msg) {
     if (msg.messageType != NIMMessageType.custom) return null;
-    final attachment = msg.attachment;
-    if (attachment is NIMMessageCustomAttachment) {
-      try {
-        final raw = attachment.rawAttachment;
-        if (raw != null && raw.isNotEmpty) {
+    try {
+      // V2 SDK 自定义消息：尝试从 attachment 的 toString 获取 JSON
+      final attachment = msg.attachment;
+      if (attachment != null) {
+        final raw = attachment.toString();
+        if (raw.isNotEmpty && (raw.startsWith('{') || raw.startsWith('['))) {
           return jsonDecode(raw) as Map<String, dynamic>;
         }
-      } catch (_) {}
-    }
+      }
+      // 备选：尝试从 serverExtension 获取
+      final ext = msg.serverExtension;
+      if (ext != null && ext.isNotEmpty) {
+        return jsonDecode(ext) as Map<String, dynamic>;
+      }
+    } catch (_) {}
     return null;
   }
 
