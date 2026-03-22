@@ -422,9 +422,12 @@ class AuthService extends ChangeNotifier {
       // 登出 IM
       await IMService.instance.logout();
 
+      // 重置 IM 相关服务
+      TZConversationService.instance.reset();
+      ChatMessageService.instance.reset();
+
       // 清除本地存储
       await _clearTokens();
-
       _currentUser = null;
       _bizToken = null;
       _refreshToken = null;
@@ -658,15 +661,18 @@ class AuthService extends ChangeNotifier {
   /// 初始化 IM 相关服务
   Future<void> _initIMServices() async {
     try {
-      // 等待数据同步完成（桌面端已在 login 中立即标记，移动端需等待 SDK 同步）
-      final syncOk = await IMService.instance.waitForDataSync(
-        timeout: const Duration(seconds: 15),
-      );
-      _log('IM 数据同步状态: ${syncOk ? "已完成" : "超时（强制继续）"}');
-
-      await TZConversationService.instance.initialize();
+      // ConversationService.initialize() 内部已包含数据同步等待逻辑
+      // 先初始化 ChatMessageService（不依赖数据同步，可立即注册消息监听）
       ChatMessageService.instance.initialize();
       UserInfoService.instance.setupListeners();
+
+      // ConversationService 初始化：
+      // 1. 先从本地缓存恢复会话列表（秒级显示）
+      // 2. 等待数据同步完成后从 SDK 加载最新数据覆盖
+      // 3. 注册会话变化监听器
+      // 4. 监听 IM 重连状态，自动刷新
+      await TZConversationService.instance.initialize();
+
       _log('IM 服务初始化完成');
     } catch (e) {
       _log('IM 服务初始化异常: $e');
@@ -701,6 +707,9 @@ class AuthService extends ChangeNotifier {
     await prefs.remove(_keyBizToken);
     await prefs.remove(_keyRefreshToken);
     await prefs.remove(_keyUserProfile);
+    // 清除会话本地缓存
+    await prefs.remove('tz_local_conversations');
+    await prefs.remove('tz_local_unread_count');
   }
 
   void _log(String message) {
