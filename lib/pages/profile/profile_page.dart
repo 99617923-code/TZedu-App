@@ -12,6 +12,7 @@ import '../../services/im_service.dart';
 import 'edit_profile_page.dart';
 import '../test/test_page.dart';
 import '../test/test_history_page.dart';
+import 'version_history_page.dart';
 
 class ProfilePage extends StatelessWidget {
   final VoidCallback? onLogout;
@@ -126,6 +127,11 @@ class ProfilePage extends StatelessWidget {
             // 功能菜单
             _buildMenuSection(context),
             const SizedBox(height: 16),
+            // 管理员专属：版本管理
+            if (user.role == 'admin') ...[
+              _buildAdminSection(context),
+              const SizedBox(height: 16),
+            ],
             // 关于
             _buildAboutSection(context),
             const SizedBox(height: 24),
@@ -343,6 +349,72 @@ class ProfilePage extends StatelessWidget {
             ],
           );
         }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildAdminSection(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 管理员标题
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF8B5CF6), Color(0xFF6366F1)],
+                    ),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Text(
+                    '管理员',
+                    style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  '系统管理',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: TZColors.textGray),
+                ),
+              ],
+            ),
+          ),
+          ListTile(
+            leading: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: const Color(0xFF8B5CF6).withOpacity(0.08),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.history, size: 18, color: Color(0xFF8B5CF6)),
+            ),
+            title: const Text('版本管理', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: TZColors.textDark)),
+            subtitle: const Text('查看完整版本更新历史、同步后端', style: TextStyle(fontSize: 12, color: TZColors.textGray)),
+            trailing: const Icon(Icons.chevron_right, color: TZColors.textLight, size: 20),
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const VersionHistoryPage()),
+              );
+            },
+          ),
+        ],
       ),
     );
   }
