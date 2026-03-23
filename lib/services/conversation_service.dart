@@ -248,38 +248,26 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
 
-    // 第二步：先注册 SDK 监听器（尽早注册，避免遗漏事件）
+    // 第二步：立即注册 SDK 监听器（必须在数据同步之前，避免遗漏事件）
     _setupListeners();
 
-    // 第三步：等待数据同步完成后从 SDK 加载最新数据
+    // 第三步：等待数据同步完成
     _log('等待 IM 数据同步完成...');
     final syncOk = await imService.waitForDataSync(timeout: const Duration(seconds: 15));
-    if (!syncOk) {
-      _log('数据同步等待超时，保持本地缓存数据，稍后重试');
-      _initialized = true;
-      // 延迟重试
-      _scheduleRetryLoad();
-      return;
-    }
-    _log('数据同步已完成');
-
-    // 第四步：等待会话同步完成（ConversationService 有自己的同步事件）
-    if (!_convSyncCompleted) {
-      _log('等待会话同步完成...');
-      try {
-        await NimCore.instance.conversationService.onSyncFinished
-            .first
-            .timeout(const Duration(seconds: 10));
-        _convSyncCompleted = true;
-        _log('会话同步已完成');
-      } catch (e) {
-        _log('等待会话同步超时，尝试直接加载: $e');
-        _convSyncCompleted = true; // 标记为已完成，避免重复等待
-      }
+    if (syncOk) {
+      _log('数据同步已完成');
+    } else {
+      _log('数据同步等待超时，仍尝试加载会话列表...');
     }
 
-    // 第五步：从 SDK 加载最新会话列表（覆盖本地缓存）
-    await loadConversations();
+    // 第四步：短暂延迟后直接加载会话列表
+    // 注意：ConversationService 的 onSyncFinished 可能在我们注册监听前就已触发
+    // 所以不再等待该事件，而是直接尝试加载，失败则重试
+    await Future.delayed(const Duration(milliseconds: 500));
+    _log('开始从 SDK 加载会话列表...');
+
+    // 第五步：从 SDK 加载最新会话列表（带重试机制）
+    await _loadConversationsWithRetry();
     await _refreshTotalUnread();
 
     // 第六步：监听 IM 连接状态变化（重连后自动刷新）
@@ -292,8 +280,8 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
   /// 延迟重试加载（数据同步超时时使用）
   void _scheduleRetryLoad() {
     Future.delayed(const Duration(seconds: 5), () async {
-      if (_isIMReady) {
-        _log('延迟重试：数据同步已完成，重新加载');
+      if (_isIMLoggedIn) {
+        _log('延迟重试：IM 已登录，重新加载');
         _setupListeners();
         await loadConversations();
         await _refreshTotalUnread();
@@ -306,11 +294,13 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   /// 注册会话变化监听（使用 Stream 方式）— 移动端专用
+  /// 注意：必须尽早注册，不依赖 _isIMReady（数据同步可能在注册前已完成）
   void _setupListeners() {
     if (_listenerRegistered) return;
     if (_isDesktopPlatform) return;
-    if (!_isIMReady) {
-      _log('IM 未就绪，延迟注册会话监听器');
+    // 只要 IM 已初始化且已登录就注册监听器（不等待数据同步完成）
+    if (!IMService.instance.isInitialized || !IMService.instance.isLoggedIn) {
+      _log('IM 未初始化或未登录，延迟注册会话监听器');
       return;
     }
 
@@ -620,14 +610,37 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
   // 会话列表操作
   // ═══════════════════════════════════════════════════════
 
+  /// 带重试机制的加载会话列表（初始化时使用）
+  Future<void> _loadConversationsWithRetry({int maxRetries = 5}) async {
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
+      _log('加载会话列表尝试 $attempt/$maxRetries');
+      await loadConversations(isRetry: attempt > 1);
+
+      // 如果加载成功（有会话数据），直接返回
+      if (_conversations.isNotEmpty) {
+        _log('加载会话列表成功，尝试次数: $attempt');
+        return;
+      }
+
+      // 如果还有重试机会，等待后重试（递增延迟）
+      if (attempt < maxRetries) {
+        final delay = Duration(seconds: attempt * 2);
+        _log('加载失败，${delay.inSeconds}秒后重试...');
+        await Future.delayed(delay);
+      }
+    }
+    _log('加载会话列表失败，已达最大重试次数');
+  }
+
   /// 加载会话列表（移动端从 SDK 加载）
   Future<void> loadConversations({bool isRetry = false}) async {
     if (_isDesktopPlatform) {
       await _loadLocalConversations();
       return;
     }
-    if (!_isIMReady) {
-      _log('IM 未就绪，跳过加载会话列表 (isReady: $_isIMReady)');
+    // 只检查 IM 是否已登录，不检查数据同步状态（避免时序问题）
+    if (!IMService.instance.isInitialized || !IMService.instance.isLoggedIn) {
+      _log('IM 未就绪，跳过加载会话列表');
       return;
     }
 
@@ -655,14 +668,6 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
         } else {
           _log('加载会话列表失败: code=${result.code}, error=${result.errorDetails}');
           hasMore = false;
-
-          // 如果是首次加载失败，延迟重试
-          if (allConversations.isEmpty && !isRetry) {
-            _log('加载失败且无数据，3秒后重试...');
-            Future.delayed(const Duration(seconds: 3), () {
-              loadConversations(isRetry: true);
-            });
-          }
         }
       }
 
@@ -675,19 +680,11 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
 
         // 保存到本地缓存
         await _saveLocalConversations();
-      } else if (!isRetry) {
-        _log('会话列表为空，3秒后重试加载...');
-        Future.delayed(const Duration(seconds: 3), () {
-          loadConversations(isRetry: true);
-        });
+      } else {
+        _log('会话列表为空');
       }
     } catch (e) {
       _log('加载会话列表异常: $e');
-      if (!isRetry) {
-        Future.delayed(const Duration(seconds: 3), () {
-          loadConversations(isRetry: true);
-        });
-      }
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -709,7 +706,7 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       return false;
     }
 
-    if (!_isIMReady) return false;
+    if (!_isIMLoggedIn) return false;
 
     try {
       final conv = _conversations.firstWhere(
@@ -742,7 +739,7 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       return true;
     }
 
-    if (!_isIMReady) return false;
+    if (!_isIMLoggedIn) return false;
 
     try {
       final result = await NimCore.instance.conversationService
@@ -775,7 +772,7 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
 
-    if (!_isIMReady) return;
+    if (!_isIMLoggedIn) return;
 
     try {
       // 使用 clearUnreadCountByIds 替代 markConversationRead
@@ -825,7 +822,7 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       return false;
     }
 
-    if (!_isIMReady) return false;
+    if (!_isIMLoggedIn) return false;
 
     try {
       final index = _conversations.indexWhere((c) => c.conversationId == conversationId);
@@ -1008,7 +1005,7 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       _recalculateUnread();
       return;
     }
-    if (!_isIMReady) return;
+    if (!_isIMLoggedIn) return;
 
     try {
       final result =
