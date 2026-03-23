@@ -260,17 +260,29 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       _log('数据同步等待超时，仍尝试加载会话列表...');
     }
 
-    // 第四步：短暂延迟后直接加载会话列表
-    // 注意：ConversationService 的 onSyncFinished 可能在我们注册监听前就已触发
-    // 所以不再等待该事件，而是直接尝试加载，失败则重试
-    await Future.delayed(const Duration(milliseconds: 500));
+    // 第四步：等待 ConversationService 同步完成
+    // SDK 的会话服务有自己的同步流程，必须等待完成后才能调用 getConversationList
+    if (!_convSyncCompleted) {
+      _log('等待会话服务同步完成...');
+      try {
+        await NimCore.instance.conversationService.onSyncFinished.first
+            .timeout(const Duration(seconds: 10));
+        _convSyncCompleted = true;
+        _log('会话服务同步完成');
+      } catch (e) {
+        _log('等待会话服务同步超时，仍尝试加载...');
+      }
+    }
+
+    // 第五步：给 SDK 内部处理时间，然后加载会话列表
+    await Future.delayed(const Duration(seconds: 2));
     _log('开始从 SDK 加载会话列表...');
 
-    // 第五步：从 SDK 加载最新会话列表（带重试机制）
+    // 第六步：从 SDK 加载最新会话列表（带重试机制）
     await _loadConversationsWithRetry();
     await _refreshTotalUnread();
 
-    // 第六步：监听 IM 连接状态变化（重连后自动刷新）
+    // 第七步：监听 IM 连接状态变化（重连后自动刷新）
     _setupIMStatusListener();
 
     _initialized = true;
@@ -344,6 +356,25 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       _unreadController.add(count);
       _saveUnreadCount(count);
       notifyListeners();
+    });
+
+    // 会话服务同步完成监听（同步完成后自动重新加载会话列表）
+    _convSyncFinishedSub = convService.onSyncFinished.listen((_) {
+      _log('会话服务同步完成回调，标记同步完成');
+      _convSyncCompleted = true;
+      // 如果之前 SDK 加载失败，同步完成后自动重新加载
+      if (!_sdkLoadSuccess) {
+        _log('同步完成，SDK加载尚未成功，自动重新加载会话列表...');
+        Future.delayed(const Duration(seconds: 1), () async {
+          await loadConversations();
+          await _refreshTotalUnread();
+        });
+      }
+    });
+
+    // 会话服务同步失败监听
+    _convSyncFailedSub = convService.onSyncFailed.listen((_) {
+      _log('会话服务同步失败回调');
     });
 
     _log('会话变化监听器注册成功');
@@ -611,21 +642,23 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
   // ═══════════════════════════════════════════════════════
 
   /// 带重试机制的加载会话列表（初始化时使用）
+  bool _sdkLoadSuccess = false;
   Future<void> _loadConversationsWithRetry({int maxRetries = 5}) async {
+    _sdkLoadSuccess = false;
     for (int attempt = 1; attempt <= maxRetries; attempt++) {
       _log('加载会话列表尝试 $attempt/$maxRetries');
       await loadConversations(isRetry: attempt > 1);
 
-      // 如果加载成功（有会话数据），直接返回
-      if (_conversations.isNotEmpty) {
-        _log('加载会话列表成功，尝试次数: $attempt');
+      // 检查 SDK 是否真正加载成功（不是仅依赖本地缓存）
+      if (_sdkLoadSuccess) {
+        _log('从SDK加载会话列表成功，尝试次数: $attempt');
         return;
       }
 
       // 如果还有重试机会，等待后重试（递增延迟）
       if (attempt < maxRetries) {
         final delay = Duration(seconds: attempt * 2);
-        _log('加载失败，${delay.inSeconds}秒后重试...');
+        _log('SDK加载失败，${delay.inSeconds}秒后重试...');
         await Future.delayed(delay);
       }
     }
@@ -676,10 +709,15 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
             .map((c) => _convertToTZConversation(c))
             .toList();
         _sortAndNotify();
+        _sdkLoadSuccess = true;
         _log('从 SDK 加载会话列表成功: ${_conversations.length} 条');
 
         // 保存到本地缓存
         await _saveLocalConversations();
+      } else if (offset == 0) {
+        // offset=0 且为空，可能是 SDK 返回了空列表（确实没有会话），也算成功
+        _sdkLoadSuccess = true;
+        _log('会话列表为空（SDK 返回成功但无数据）');
       } else {
         _log('会话列表为空');
       }
@@ -1029,6 +1067,7 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
     _listenerRegistered = false;
     _initialized = false;
     _convSyncCompleted = false;
+    _sdkLoadSuccess = false;
     _convChangedSub?.cancel();
     _convCreatedSub?.cancel();
     _convDeletedSub?.cancel();
