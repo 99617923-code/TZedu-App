@@ -69,6 +69,8 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     super.initState();
     // 设置当前活跃会话，避免弹出当前会话的通知
     AppNotificationService.instance.setActiveConversation(widget.conversationId);
+    // 设置会话服务的活跃会话，避免重复增加未读数
+    TZConversationService.instance.setActiveConversation(widget.conversationId);
     _loadConversationInfo();
     _loadHistoryMessages();
     _listenNewMessages();
@@ -81,6 +83,7 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     if (oldWidget.conversationId != widget.conversationId) {
       // 更新活跃会话
       AppNotificationService.instance.setActiveConversation(widget.conversationId);
+      TZConversationService.instance.setActiveConversation(widget.conversationId);
       _messages.clear();
       _hasMoreHistory = true;
       _showAttachPanel = false;
@@ -94,6 +97,7 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
   void dispose() {
     // 清除活跃会话，恢复通知显示
     AppNotificationService.instance.setActiveConversation(null);
+    TZConversationService.instance.setActiveConversation(null);
     _inputController.dispose();
     _scrollController.dispose();
     _messageSub?.cancel();
