@@ -161,6 +161,11 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<List<String>>? _convDeletedSub;
   StreamSubscription<int>? _totalUnreadSub;
 
+  // 会话同步完成监听
+  StreamSubscription<void>? _convSyncFinishedSub;
+  StreamSubscription<void>? _convSyncFailedSub;
+  bool _convSyncCompleted = false;
+
   // 桌面端新消息监听
   StreamSubscription<List<NIMMessage>>? _desktopMessageSub;
 
@@ -243,7 +248,10 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
 
-    // 第二步：等待数据同步完成后从 SDK 加载最新数据
+    // 第二步：先注册 SDK 监听器（尽早注册，避免遗漏事件）
+    _setupListeners();
+
+    // 第三步：等待数据同步完成后从 SDK 加载最新数据
     _log('等待 IM 数据同步完成...');
     final syncOk = await imService.waitForDataSync(timeout: const Duration(seconds: 15));
     if (!syncOk) {
@@ -253,16 +261,28 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
       _scheduleRetryLoad();
       return;
     }
-    _log('数据同步已完成，开始从 SDK 加载会话列表');
+    _log('数据同步已完成');
 
-    // 第三步：注册 SDK 监听器（确保在数据同步完成后注册）
-    _setupListeners();
+    // 第四步：等待会话同步完成（ConversationService 有自己的同步事件）
+    if (!_convSyncCompleted) {
+      _log('等待会话同步完成...');
+      try {
+        await NimCore.instance.conversationService.onSyncFinished
+            .first
+            .timeout(const Duration(seconds: 10));
+        _convSyncCompleted = true;
+        _log('会话同步已完成');
+      } catch (e) {
+        _log('等待会话同步超时，尝试直接加载: $e');
+        _convSyncCompleted = true; // 标记为已完成，避免重复等待
+      }
+    }
 
-    // 第四步：从 SDK 加载最新会话列表（覆盖本地缓存）
+    // 第五步：从 SDK 加载最新会话列表（覆盖本地缓存）
     await loadConversations();
     await _refreshTotalUnread();
 
-    // 第五步：监听 IM 连接状态变化（重连后自动刷新）
+    // 第六步：监听 IM 连接状态变化（重连后自动刷新）
     _setupIMStatusListener();
 
     _initialized = true;
@@ -615,12 +635,39 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
 
     try {
-      final result = await NimCore.instance.conversationService
-          .getConversationList(0, 200);
+      // 分页加载会话列表，每次最多 100 条（SDK 限制不超过 100）
+      List<NIMConversation> allConversations = [];
+      int offset = 0;
+      const int pageSize = 100;
+      bool hasMore = true;
 
-      if (result.isSuccess && result.data != null) {
-        final nimConversations = result.data!.conversationList ?? [];
-        _conversations = nimConversations
+      while (hasMore) {
+        _log('加载会话列表: offset=$offset, limit=$pageSize');
+        final result = await NimCore.instance.conversationService
+            .getConversationList(offset, pageSize);
+
+        if (result.isSuccess && result.data != null) {
+          final nimConversations = result.data!.conversationList ?? [];
+          allConversations.addAll(nimConversations);
+          offset = result.data!.offset;
+          hasMore = !result.data!.finished && nimConversations.isNotEmpty;
+          _log('本页加载 ${nimConversations.length} 条，总计 ${allConversations.length} 条，还有更多: $hasMore');
+        } else {
+          _log('加载会话列表失败: code=${result.code}, error=${result.errorDetails}');
+          hasMore = false;
+
+          // 如果是首次加载失败，延迟重试
+          if (allConversations.isEmpty && !isRetry) {
+            _log('加载失败且无数据，3秒后重试...');
+            Future.delayed(const Duration(seconds: 3), () {
+              loadConversations(isRetry: true);
+            });
+          }
+        }
+      }
+
+      if (allConversations.isNotEmpty) {
+        _conversations = allConversations
             .map((c) => _convertToTZConversation(c))
             .toList();
         _sortAndNotify();
@@ -628,24 +675,19 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
 
         // 保存到本地缓存
         await _saveLocalConversations();
-
-        // 如果首次加载为空，延迟重试
-        if (_conversations.isEmpty && !isRetry) {
-          _log('会话列表为空，3秒后重试加载...');
-          Future.delayed(const Duration(seconds: 3), () {
-            loadConversations(isRetry: true);
-          });
-        }
-      } else {
-        _log('加载会话列表失败: ${result.errorDetails}');
-        if (!isRetry) {
-          Future.delayed(const Duration(seconds: 3), () {
-            loadConversations(isRetry: true);
-          });
-        }
+      } else if (!isRetry) {
+        _log('会话列表为空，3秒后重试加载...');
+        Future.delayed(const Duration(seconds: 3), () {
+          loadConversations(isRetry: true);
+        });
       }
     } catch (e) {
       _log('加载会话列表异常: $e');
+      if (!isRetry) {
+        Future.delayed(const Duration(seconds: 3), () {
+          loadConversations(isRetry: true);
+        });
+      }
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -751,7 +793,7 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
           await _saveLocalConversations();
         }
       } else {
-        _log('标记已读失败: ${result.errorDetails}');
+        _log('标记已读失败: code=${result.code}, error=${result.errorDetails}');
         // 回退到旧方法
         try {
           await NimCore.instance.conversationService
@@ -989,10 +1031,13 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
     _totalUnreadCount = 0;
     _listenerRegistered = false;
     _initialized = false;
+    _convSyncCompleted = false;
     _convChangedSub?.cancel();
     _convCreatedSub?.cancel();
     _convDeletedSub?.cancel();
     _totalUnreadSub?.cancel();
+    _convSyncFinishedSub?.cancel();
+    _convSyncFailedSub?.cancel();
     _desktopMessageSub?.cancel();
     _imStatusSub?.cancel();
     _refreshDebounceTimer?.cancel();
@@ -1000,6 +1045,8 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
     _convCreatedSub = null;
     _convDeletedSub = null;
     _totalUnreadSub = null;
+    _convSyncFinishedSub = null;
+    _convSyncFailedSub = null;
     _desktopMessageSub = null;
     _imStatusSub = null;
     notifyListeners();
@@ -1017,6 +1064,8 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
     _convCreatedSub?.cancel();
     _convDeletedSub?.cancel();
     _totalUnreadSub?.cancel();
+    _convSyncFinishedSub?.cancel();
+    _convSyncFailedSub?.cancel();
     _desktopMessageSub?.cancel();
     _imStatusSub?.cancel();
     _refreshDebounceTimer?.cancel();
