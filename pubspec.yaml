@@ -1,7 +1,7 @@
 name: tz_ielts
 description: "途正英语 - 智慧教学管理系统（Flutter多端版）· 火鹰科技出品"
 publish_to: 'none'
-version: 1.0.0+1
+version: 0.1.0+1
 
 environment:
   sdk: ^3.7.2

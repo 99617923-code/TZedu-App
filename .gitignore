@@ -52,6 +52,10 @@ app.*.map.json
 **/windows/flutter/ephemeral/
 pubspec.lock
 
+# Xcode user-specific data (prevents "modified by another application" popup)
+**/xcuserdata/
+*.xcuserdatad/
+
 # 开发脚本运行时文件
 .dev_pids/
 .dev_logs/
