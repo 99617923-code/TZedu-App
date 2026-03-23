@@ -12,7 +12,7 @@
 /// - 桌面端（macOS/Windows）：NIM PC SDK 的 ConversationService 存在原生层缺陷
 ///   因此在桌面端使用"本地会话管理"模式
 ///
-/// v3.0 修复（2026-03-23）：
+/// 2026-03-23 修复：
 /// - 修复移动端未读红点不显示的问题
 /// - 移动端增加 onReceiveMessages 监听，收到新消息时手动累加未读数
 /// - _upsertConversation 增加智能合并逻辑：SDK 返回 unreadCount=0 时保留本地未读数
