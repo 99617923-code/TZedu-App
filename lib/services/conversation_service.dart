@@ -767,7 +767,7 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   /// 切换会话免打扰
-  /// 使用网易云信 V2 SDK 的 settingService 设置免打扰
+  /// 使用网易云信 V2 SDK 的 settingsService 设置免打扰
   /// P2P 会话使用 setP2PMessageMuteMode
   /// 群聊会话使用 setTeamMessageMuteMode
   Future<bool> toggleMute(String conversationId) async {
@@ -795,12 +795,12 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
 
       if (conv.type == NIMConversationType.p2p) {
         // 单聊免打扰
-        final result = await NimCore.instance.settingService
+        final result = await NimCore.instance.settingsService
             .setP2PMessageMuteMode(
               targetId,
               currentMuted
-                  ? V2NIMP2PMessageMuteMode.v2NIM_P2P_MESSAGE_MUTE_MODE_OFF
-                  : V2NIMP2PMessageMuteMode.v2NIM_P2P_MESSAGE_MUTE_MODE_ON,
+                  ? NIMP2PMessageMuteMode.p2pMessageMuteModeOff
+                  : NIMP2PMessageMuteMode.p2pMessageMuteModeOn,
             );
         if (result.isSuccess) {
           _conversations[index] = conv.copyWith(isMuted: !currentMuted);
@@ -811,15 +811,15 @@ class TZConversationService extends ChangeNotifier with WidgetsBindingObserver {
         }
       } else {
         // 群聊免打扰
-        final result = await NimCore.instance.settingService
+        final result = await NimCore.instance.settingsService
             .setTeamMessageMuteMode(
               targetId,
               conv.type == NIMConversationType.superTeam
-                  ? NIMTeamType.superTeam
-                  : NIMTeamType.normalTeam,
+                  ? NIMTeamType.typeSuper
+                  : NIMTeamType.typeNormal,
               currentMuted
-                  ? NIMTeamMessageMuteMode.v2NIM_TEAM_MESSAGE_MUTE_MODE_OFF
-                  : NIMTeamMessageMuteMode.v2NIM_TEAM_MESSAGE_MUTE_MODE_ON,
+                  ? NIMTeamMessageMuteMode.teamMessageMuteModeOff
+                  : NIMTeamMessageMuteMode.teamMessageMuteModeOn,
             );
         if (result.isSuccess) {
           _conversations[index] = conv.copyWith(isMuted: !currentMuted);

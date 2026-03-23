@@ -657,15 +657,15 @@ class ChatMessageService extends ChangeNotifier {
     }
   }
 
-  /// 根据消息 ID 列表获取消息
+  /// 根据消息客户端 ID 列表获取消息
   Future<List<TZMessage>> getMessagesByIds(
-    List<NIMMessageRefer> messageRefers,
+    List<String> messageClientIds,
   ) async {
     if (!_isIMConnected) return [];
 
     try {
       final result = await NimCore.instance.messageService
-          .getMessageListByIds(messageRefers: messageRefers);
+          .getMessageListByIds(messageClientIds: messageClientIds);
 
       if (result.isSuccess && result.data != null) {
         return result.data!.map((m) => _convertToTZMessage(m)).toList();
@@ -746,11 +746,12 @@ class ChatMessageService extends ChangeNotifier {
     if (!_isIMConnected) return false;
 
     try {
-      final result = await NimCore.instance.messageService
-          .clearHistoryMessage(
+      final option = NIMClearHistoryMessageOption(
         conversationId: conversationId,
         deleteRoam: true,
       );
+      final result = await NimCore.instance.messageService
+          .clearHistoryMessage(option: option);
 
       if (result.isSuccess) {
         _log('清空历史消息成功: $conversationId');
@@ -837,20 +838,28 @@ class ChatMessageService extends ChangeNotifier {
     try {
       _log('搜索本地消息: $conversationId, keyword: $keyword');
 
-      final option = NIMMessageSearchParams(
-        keyword: keyword,
+      final params = NIMMessageSearchExParams(
+        keywordList: [keyword],
         conversationId: conversationId,
-        messageLimit: limit,
-        sortOrder: NIMSortOrder.desc,
+        limit: limit,
+        direction: NIMSearchDirection.V2NIM_SEARCH_DIRECTION_BACKWARD,
       );
 
       final result = await NimCore.instance.messageService
-          .searchLocalMessages(option: option);
+          .searchLocalMessages(params);
 
       if (result.isSuccess && result.data != null) {
-        final messages = result.data!
-            .map((m) => _convertToTZMessage(m))
-            .toList();
+        final searchResult = result.data!;
+        final List<TZMessage> messages = [];
+        if (searchResult.items != null) {
+          for (final item in searchResult.items!) {
+            if (item.messages != null) {
+              messages.addAll(
+                item.messages!.map((m) => _convertToTZMessage(m)),
+              );
+            }
+          }
+        }
         _log('搜索到 ${messages.length} 条消息');
         return messages;
       }
