@@ -21,6 +21,9 @@ import 'chat_panel.dart';
 import 'chat_panel_im.dart';
 import 'chat_room_page.dart';
 import 'widgets/chat_item_card.dart';
+import 'select_contacts_page.dart';
+import 'create_team_page.dart';
+import '../../services/team_service.dart';
 
 class ChatListPage extends StatefulWidget {
   const ChatListPage({super.key});
@@ -151,12 +154,138 @@ class _ChatListPageState extends State<ChatListPage> {
       return;
     }
 
+    // 显示选择弹窗：发起私聊 / 发起群聊
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 36,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE5E7EB),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              ListTile(
+                leading: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF5F3FF),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.person_add_alt_1, color: Color(0xFF7C3AED), size: 20),
+                ),
+                title: const Text('发起私聊', style: TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: const Text('通过手机号搜索用户', style: TextStyle(fontSize: 12, color: Color(0xFF9CA3AF))),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showP2PChatDialog();
+                },
+              ),
+              const Divider(height: 1, indent: 68),
+              ListTile(
+                leading: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF0FDF4),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.group_add, color: Color(0xFF10B981), size: 20),
+                ),
+                title: const Text('发起群聊', style: TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: const Text('选择联系人创建群聊', style: TextStyle(fontSize: 12, color: Color(0xFF9CA3AF))),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showCreateTeamFlow();
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 显示发起私聊对话框
+  void _showP2PChatDialog() {
     showDialog(
       context: context,
       builder: (ctx) => _NewChatDialog(
         onStartChat: (accid, nickname) => _startP2PChat(accid, nickname),
       ),
     );
+  }
+
+  /// 发起群聊流程：选择联系人 -> 填写群信息 -> 创建
+  Future<void> _showCreateTeamFlow() async {
+    final isDesktop = Responsive.isDesktop(context);
+
+    // 第一步：选择联系人
+    final selectedContacts = await Navigator.of(context).push<List<SelectableContact>>(
+      MaterialPageRoute(
+        builder: (_) => const SelectContactsPage(
+          title: '选择群聊成员',
+        ),
+      ),
+    );
+
+    if (selectedContacts == null || selectedContacts.isEmpty || !mounted) return;
+
+    // 第二步：填写群信息并创建
+    if (isDesktop) {
+      // 桌面端：直接创建群聊（使用默认群名）
+      final names = selectedContacts.map((c) => c.name).toList();
+      final defaultName = names.length <= 3
+          ? names.join('、')
+          : '${names.take(3).join('、')}等${names.length}人';
+
+      final accids = selectedContacts.map((c) => c.accid).toList();
+      final result = await TZTeamService.instance.createTeam(
+        name: defaultName,
+        inviteeAccids: accids,
+      );
+
+      if (!mounted) return;
+
+      if (result.success && result.conversationId != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('群聊创建成功'),
+            backgroundColor: Color(0xFF10B981),
+          ),
+        );
+        setState(() {
+          _selectedConversationId = result.conversationId;
+          _selectedChatId = null;
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('创建失败: ${result.error ?? "未知错误"}'),
+            backgroundColor: const Color(0xFFEF4444),
+          ),
+        );
+      }
+    } else {
+      // 移动端：跳转到创建群聊页面
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => CreateTeamPage(selectedContacts: selectedContacts),
+        ),
+      );
+    }
   }
 
   /// 通过 accid 发起 P2P 聊天

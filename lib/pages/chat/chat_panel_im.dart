@@ -29,6 +29,8 @@ import '../../services/user_info_service.dart';
 import '../../services/conversation_service.dart';
 import '../../services/notification_service.dart';
 import '../../services/audio_service.dart';
+import '../../services/team_service.dart';
+import 'team_info_page.dart';
 
 class ChatPanelIM extends StatefulWidget {
   final String conversationId;
@@ -1034,6 +1036,25 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
 
   /// 聊天设置面板
   void _showChatSettings() {
+    // 群聊：直接跳转到群聊信息页
+    if (!_isP2P) {
+      final targetId = _extractTargetId(widget.conversationId);
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => TeamInfoPage(
+            teamId: targetId,
+            conversationId: widget.conversationId,
+          ),
+        ),
+      ).then((_) {
+        // 返回时刷新会话信息（群名称可能已修改）
+        _loadConversationInfo();
+        if (mounted) setState(() {});
+      });
+      return;
+    }
+
+    // P2P：显示设置底部弹窗
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
