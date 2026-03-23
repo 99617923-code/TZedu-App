@@ -11,6 +11,7 @@ import 'package:http/http.dart' as http;
 import '../config/im_config.dart';
 import '../models/app_version.dart';
 import '../data/changelog_data.dart';
+import 'auth_service.dart';
 
 class VersionService extends ChangeNotifier {
   static final VersionService _instance = VersionService._internal();
@@ -48,9 +49,10 @@ class VersionService extends ChangeNotifier {
     notifyListeners();
 
     // 2. 尝试从后端拉取最新版本数据
-    if (authToken != null) {
+    final token = authToken ?? AuthService.instance.bizToken;
+    if (token != null) {
       try {
-        final remoteVersions = await _fetchRemoteVersions(authToken);
+        final remoteVersions = await _fetchRemoteVersions(token);
         if (remoteVersions.isNotEmpty) {
           _mergeVersions(remoteVersions);
         }
@@ -117,75 +119,191 @@ class VersionService extends ChangeNotifier {
   // 后端 API 交互
   // ═══════════════════════════════════════════════════════
 
+  /// 获取有效的 Token（如果过期则自动刷新）
+  Future<String?> _getValidToken(String? providedToken) async {
+    // 优先使用传入的 token
+    String? token = providedToken ?? AuthService.instance.bizToken;
+    if (token == null) return null;
+
+    // 尝试验证 token 是否有效（通过一个轻量级请求）
+    // 如果后续请求返回 401/403，会自动尝试刷新
+    return token;
+  }
+
+  /// 带自动 Token 刷新的 HTTP 请求封装
+  Future<http.Response> _authenticatedRequest({
+    required String method,
+    required String url,
+    required String token,
+    String? body,
+  }) async {
+    // 第一次请求
+    final headers = IMConfig.authHeaders(token);
+    http.Response response;
+
+    if (method == 'GET') {
+      response = await http.get(Uri.parse(url), headers: headers)
+          .timeout(const Duration(seconds: 15));
+    } else {
+      response = await http.post(Uri.parse(url), headers: headers, body: body)
+          .timeout(const Duration(seconds: 15));
+    }
+
+    // 如果返回 401 或 403，尝试刷新 Token 后重试
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      debugPrint('[VersionService] Token 可能过期 (${response.statusCode})，尝试刷新...');
+
+      final refreshed = await AuthService.instance.refreshBizToken();
+      if (refreshed) {
+        final newToken = AuthService.instance.bizToken;
+        if (newToken != null) {
+          debugPrint('[VersionService] Token 刷新成功，重试请求...');
+          final newHeaders = IMConfig.authHeaders(newToken);
+
+          if (method == 'GET') {
+            response = await http.get(Uri.parse(url), headers: newHeaders)
+                .timeout(const Duration(seconds: 15));
+          } else {
+            response = await http.post(Uri.parse(url), headers: newHeaders, body: body)
+                .timeout(const Duration(seconds: 15));
+          }
+        }
+      } else {
+        debugPrint('[VersionService] Token 刷新失败');
+      }
+    }
+
+    return response;
+  }
+
   /// 从后端拉取版本列表
   /// GET /api/v1/app/versions
   Future<List<AppVersion>> _fetchRemoteVersions(String authToken) async {
     final url = '${IMConfig.apiBaseUrl}/api/v1/app/versions';
     debugPrint('[VersionService] 正在从后端拉取版本数据: $url');
 
-    final response = await http.get(
-      Uri.parse(url),
-      headers: IMConfig.authHeaders(authToken),
-    ).timeout(const Duration(seconds: 10));
+    final response = await _authenticatedRequest(
+      method: 'GET',
+      url: url,
+      token: authToken,
+    );
 
     if (response.statusCode == 200) {
       final body = json.decode(response.body);
-      final data = body['data'] as List<dynamic>? ?? [];
-      return data
-          .map((e) => AppVersion.fromJson(e as Map<String, dynamic>))
-          .toList();
+      if (body['code'] == 200) {
+        final data = body['data'] as List<dynamic>? ?? [];
+        debugPrint('[VersionService] 从后端拉取到 ${data.length} 个版本');
+        return data
+            .map((e) => AppVersion.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
+      debugPrint('[VersionService] 后端业务码: ${body['code']}, msg: ${body['msg']}');
     }
 
-    debugPrint('[VersionService] 后端返回: ${response.statusCode}');
+    debugPrint('[VersionService] 后端返回 HTTP ${response.statusCode}: ${response.body}');
     return [];
   }
 
   /// 上报本地版本数据到后端（管理员操作）
   /// POST /api/v1/app/versions/sync
-  Future<bool> syncToBackend(String authToken) async {
+  /// 返回 (bool success, String message) 元组
+  Future<({bool success, String message})> syncToBackend(String authToken) async {
     try {
       final url = '${IMConfig.apiBaseUrl}/api/v1/app/versions/sync';
       debugPrint('[VersionService] 正在上报版本数据到后端: $url');
+      debugPrint('[VersionService] 共 ${appVersionHistory.length} 个版本待同步');
 
-      final response = await http.post(
-        Uri.parse(url),
-        headers: IMConfig.authHeaders(authToken),
-        body: json.encode({
-          'versions': appVersionHistory.map((v) => v.toJson()).toList(),
-          'sync_time': DateTime.now().toIso8601String(),
-          'source': 'app_builtin',
-        }),
-      ).timeout(const Duration(seconds: 15));
+      final requestBody = json.encode({
+        'versions': appVersionHistory.map((v) => v.toJson()).toList(),
+        'sync_time': DateTime.now().toIso8601String(),
+        'source': 'app_builtin',
+      });
+
+      final response = await _authenticatedRequest(
+        method: 'POST',
+        url: url,
+        token: authToken,
+        body: requestBody,
+      );
+
+      debugPrint('[VersionService] 同步响应: HTTP ${response.statusCode}');
+      debugPrint('[VersionService] 响应体: ${response.body}');
 
       if (response.statusCode == 200 || response.statusCode == 201) {
-        _lastSyncTime = DateTime.now();
-        notifyListeners();
-        return true;
+        final body = json.decode(response.body);
+        if (body['code'] == 200) {
+          final data = body['data'] as Map<String, dynamic>?;
+          _lastSyncTime = DateTime.now();
+          notifyListeners();
+
+          final total = data?['total'] ?? 0;
+          final created = data?['created'] ?? 0;
+          final skipped = data?['skipped'] ?? 0;
+          return (
+            success: true,
+            message: '同步完成：共 $total 个版本，新增 $created，跳过 $skipped',
+          );
+        }
+        return (
+          success: false,
+          message: '后端返回错误: ${body['msg'] ?? '未知错误'} (code: ${body['code']})',
+        );
       }
 
-      debugPrint('[VersionService] 上报失败: ${response.statusCode}');
-      return false;
+      // 解析错误响应
+      String errorMsg;
+      try {
+        final body = json.decode(response.body);
+        errorMsg = body['msg'] ?? '未知错误';
+      } catch (_) {
+        errorMsg = response.body;
+      }
+
+      switch (response.statusCode) {
+        case 401:
+          return (success: false, message: '认证失败: Token 无效或已过期，请重新登录 ($errorMsg)');
+        case 403:
+          return (success: false, message: '权限不足: X-App-Key 无效或无权限 ($errorMsg)');
+        case 404:
+          return (success: false, message: '接口不存在: 后端可能尚未部署版本管理模块');
+        case 500:
+          return (success: false, message: '服务器内部错误: $errorMsg');
+        default:
+          return (success: false, message: 'HTTP ${ response.statusCode}: $errorMsg');
+      }
     } catch (e) {
       debugPrint('[VersionService] 上报异常: $e');
-      return false;
+      if (e.toString().contains('TimeoutException')) {
+        return (success: false, message: '请求超时，请检查网络连接');
+      }
+      return (success: false, message: '网络异常: $e');
     }
   }
 
   /// 上报单个版本到后端
   /// POST /api/v1/app/versions
-  Future<bool> reportVersion(String authToken, AppVersion version) async {
+  Future<({bool success, String message})> reportVersion(String authToken, AppVersion version) async {
     try {
       final url = '${IMConfig.apiBaseUrl}/api/v1/app/versions';
-      final response = await http.post(
-        Uri.parse(url),
-        headers: IMConfig.authHeaders(authToken),
+      final response = await _authenticatedRequest(
+        method: 'POST',
+        url: url,
+        token: authToken,
         body: json.encode(version.toJson()),
-      ).timeout(const Duration(seconds: 10));
+      );
 
-      return response.statusCode == 200 || response.statusCode == 201;
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final body = json.decode(response.body);
+        if (body['code'] == 200) {
+          return (success: true, message: '版本 ${version.version} 上报成功');
+        }
+        return (success: false, message: '上报失败: ${body['msg'] ?? '未知错误'}');
+      }
+
+      return (success: false, message: 'HTTP ${response.statusCode}');
     } catch (e) {
       debugPrint('[VersionService] 上报单个版本失败: $e');
-      return false;
+      return (success: false, message: '网络异常: $e');
     }
   }
 

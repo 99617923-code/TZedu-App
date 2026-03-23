@@ -565,14 +565,14 @@ class _VersionHistoryPageState extends State<VersionHistoryPage> {
 
     setState(() => _isSyncing = true);
 
-    final success = await _versionService.syncToBackend(auth.bizToken!);
+    final result = await _versionService.syncToBackend(auth.bizToken!);
 
     setState(() => _isSyncing = false);
 
-    if (success) {
-      _showSnackBar('版本数据已同步到后端');
+    if (result.success) {
+      _showSnackBar(result.message);
     } else {
-      _showSnackBar('同步失败，后端接口可能尚未部署', isError: true);
+      _showSnackBar(result.message, isError: true);
     }
   }
 
