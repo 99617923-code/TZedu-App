@@ -983,11 +983,13 @@ class ChatMessageService extends ChangeNotifier {
     return null;
   }
 
-  /// 提取语音时长
+  /// 提取语音时长（转换为秒，SDK 返回毫秒）
   int? _extractAudioDuration(NIMMessage msg) {
     final attachment = msg.attachment;
     if (attachment is NIMMessageAudioAttachment) {
-      return attachment.duration;
+      final ms = attachment.duration ?? 0;
+      // SDK 返回毫秒，转换为秒（向上取整，至少 1 秒）
+      return ms > 0 ? (ms / 1000).ceil().clamp(1, 999) : 0;
     }
     return null;
   }

@@ -27,6 +27,7 @@ import '../../services/chat_message_service.dart';
 import '../../services/user_info_service.dart';
 import '../../services/conversation_service.dart';
 import '../../services/notification_service.dart';
+import '../../services/audio_service.dart';
 
 class ChatPanelIM extends StatefulWidget {
   final String conversationId;
@@ -44,7 +45,6 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
   List<TZMessage> _messages = [];
   bool _isLoadingHistory = false;
   bool _hasMoreHistory = true;
-  bool _isRecording = false;
   bool _showAttachPanel = false;
   bool _isSendingAttachment = false;
   StreamSubscription? _messageSub;
@@ -98,6 +98,8 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     // 清除活跃会话，恢复通知显示
     AppNotificationService.instance.setActiveConversation(null);
     TZConversationService.instance.setActiveConversation(null);
+    // 停止录音和播放
+    TZAudioService.instance.stopPlaying();
     _inputController.dispose();
     _scrollController.dispose();
     _messageSub?.cancel();
@@ -426,6 +428,102 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
       debugPrint('[ChatPanelIM] 选择文件异常: $e');
       setState(() => _isSendingAttachment = false);
     }
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 语音消息
+  // ═══════════════════════════════════════════════════════
+
+  /// 开始录音
+  Future<void> _startRecording() async {
+    final audioService = TZAudioService.instance;
+    final started = await audioService.startRecording();
+    if (!started && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('无法录音，请检查麦克风权限'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+    }
+  }
+
+  /// 停止录音并发送
+  Future<void> _stopRecordingAndSend() async {
+    final audioService = TZAudioService.instance;
+    final result = await audioService.stopRecording();
+
+    if (result == null) {
+      // 录音时间太短或失败
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('录音时间太短，请长按录音'),
+            backgroundColor: Color(0xFFF59E0B),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
+      return;
+    }
+
+    // 计算时长（毫秒转秒，向上取整，至少 1 秒）
+    final durationSeconds = (result.durationMs / 1000).ceil().clamp(1, 60);
+
+    // 添加发送中的本地消息
+    final tempMsg = TZMessage(
+      messageId: 'temp-audio-${DateTime.now().millisecondsSinceEpoch}',
+      conversationId: widget.conversationId,
+      senderId: _myAccid,
+      senderName: '我',
+      type: TZMessageType.audio,
+      audioDuration: durationSeconds,
+      timestamp: DateTime.now(),
+      status: TZMessageStatus.sending,
+    );
+    setState(() => _messages.add(tempMsg));
+    _scrollToBottom();
+
+    // 通过 SDK 发送语音消息
+    final sendResult = await ChatMessageService.instance.sendAudioMessage(
+      widget.conversationId,
+      result.filePath,
+      durationSeconds * 1000, // SDK 需要毫秒
+    );
+
+    setState(() {
+      _messages.removeWhere((m) => m.messageId == tempMsg.messageId);
+      if (sendResult != null) {
+        _messages.add(sendResult);
+        _updateLocalConversation('[语音] ${durationSeconds}s');
+      } else {
+        _messages.add(TZMessage(
+          messageId: tempMsg.messageId,
+          conversationId: widget.conversationId,
+          senderId: _myAccid,
+          type: TZMessageType.audio,
+          audioDuration: durationSeconds,
+          timestamp: DateTime.now(),
+          status: TZMessageStatus.failed,
+        ));
+      }
+    });
+    _scrollToBottom();
+  }
+
+  /// 取消录音
+  Future<void> _cancelRecording() async {
+    await TZAudioService.instance.cancelRecording();
+  }
+
+  /// 播放语音消息
+  Future<void> _playAudioMessage(TZMessage msg) async {
+    final audioUrl = msg.audioUrl;
+    if (audioUrl == null || audioUrl.isEmpty) {
+      debugPrint('[ChatPanelIM] 语音消息没有 URL');
+      return;
+    }
+    await TZAudioService.instance.playAudio(audioUrl, messageId: msg.messageId);
   }
 
   /// 重发失败的消息
@@ -1313,60 +1411,73 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     final duration = msg.audioDuration ?? 0;
     final width = 80.0 + (duration * 3).clamp(0, 120).toDouble();
 
-    return GestureDetector(
-      onTap: () {
-        // TODO: 播放语音
-      },
-      child: Container(
-        width: width,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: isMine
-              ? const Color(0xFF7C3AED)
-              : Colors.white,
-          borderRadius: BorderRadius.only(
-            topLeft: Radius.circular(isMine ? 16 : 4),
-            topRight: Radius.circular(isMine ? 4 : 16),
-            bottomLeft: const Radius.circular(16),
-            bottomRight: const Radius.circular(16),
+    return ListenableBuilder(
+      listenable: TZAudioService.instance,
+      builder: (context, _) {
+        final audioService = TZAudioService.instance;
+        final isPlayingThis = audioService.isPlaying && audioService.playingMessageId == msg.messageId;
+
+        return GestureDetector(
+          onTap: () => _playAudioMessage(msg),
+          child: Container(
+            width: width,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: isMine
+                  ? const Color(0xFF7C3AED)
+                  : Colors.white,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(isMine ? 16 : 4),
+                topRight: Radius.circular(isMine ? 4 : 16),
+                bottomLeft: const Radius.circular(16),
+                bottomRight: const Radius.circular(16),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.04),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  isPlayingThis ? Icons.pause : Icons.play_arrow,
+                  size: 18,
+                  color: isMine ? Colors.white : const Color(0xFF7C3AED),
+                ),
+                const SizedBox(width: 4),
+                // 动态音波指示器
+                ...List.generate(3, (i) {
+                  final baseH = 8.0 + (i * 4);
+                  final animH = isPlayingThis
+                      ? baseH * (0.5 + audioService.playProgress * 0.5)
+                      : baseH;
+                  return Container(
+                    width: 3,
+                    height: animH,
+                    margin: const EdgeInsets.symmetric(horizontal: 1),
+                    decoration: BoxDecoration(
+                      color: (isMine ? Colors.white : const Color(0xFF7C3AED)).withOpacity(isPlayingThis ? 1.0 : 0.6),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  );
+                }),
+                const Spacer(),
+                Text(
+                  '${duration}″',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isMine ? Colors.white : const Color(0xFF6B7280),
+                  ),
+                ),
+              ],
+            ),
           ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.04),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.play_arrow,
-              size: 18,
-              color: isMine ? Colors.white : const Color(0xFF7C3AED),
-            ),
-            const SizedBox(width: 4),
-            ...List.generate(3, (i) => Container(
-              width: 3,
-              height: 8.0 + (i * 4),
-              margin: const EdgeInsets.symmetric(horizontal: 1),
-              decoration: BoxDecoration(
-                color: (isMine ? Colors.white : const Color(0xFF7C3AED)).withOpacity(0.6),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            )),
-            const Spacer(),
-            Text(
-              '${duration}″',
-              style: TextStyle(
-                fontSize: 12,
-                color: isMine ? Colors.white : const Color(0xFF6B7280),
-              ),
-            ),
-          ],
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -1716,20 +1827,27 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
                 )
               else
                 GestureDetector(
-                  onLongPressStart: (_) => setState(() => _isRecording = true),
-                  onLongPressEnd: (_) => setState(() => _isRecording = false),
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: _isRecording ? const Color(0xFFEF4444) : const Color(0xFFF3F4F6),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Icon(
-                      Icons.mic,
-                      size: 18,
-                      color: _isRecording ? Colors.white : const Color(0xFF6B7280),
-                    ),
+                  onLongPressStart: (_) => _startRecording(),
+                  onLongPressEnd: (_) => _stopRecordingAndSend(),
+                  onLongPressCancel: () => _cancelRecording(),
+                  child: ListenableBuilder(
+                    listenable: TZAudioService.instance,
+                    builder: (context, _) {
+                      final isRec = TZAudioService.instance.isRecording;
+                      return Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: isRec ? const Color(0xFFEF4444) : const Color(0xFFF3F4F6),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Icon(
+                          Icons.mic,
+                          size: 18,
+                          color: isRec ? Colors.white : const Color(0xFF6B7280),
+                        ),
+                      );
+                    },
                   ),
                 ),
               // 附件按钮（+号）— 暂时隐藏，待相册/拍照/视频/文件功能完善后恢复
@@ -1742,37 +1860,47 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
             ],
           ),
           // 录音提示
-          if (_isRecording)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFEF2F2),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    SizedBox(
-                      width: 8,
-                      height: 8,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: Color(0xFFEF4444),
-                          shape: BoxShape.circle,
-                        ),
+          ListenableBuilder(
+            listenable: TZAudioService.instance,
+            builder: (context, _) {
+              if (!TZAudioService.instance.isRecording) return const SizedBox.shrink();
+              final seconds = TZAudioService.instance.recordingSeconds;
+              final amp = TZAudioService.instance.amplitude;
+              return Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEF2F2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // 动态振幅指示器
+                      ...List.generate(5, (i) {
+                        final h = 4.0 + (amp * 12 * ((i % 3) + 1) / 3);
+                        return Container(
+                          width: 3,
+                          height: h.clamp(4.0, 16.0),
+                          margin: const EdgeInsets.symmetric(horizontal: 1),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFEF4444),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        );
+                      }),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${seconds}s  松开发送，上滑取消',
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFFEF4444)),
                       ),
-                    ),
-                    SizedBox(width: 8),
-                    Text(
-                      '正在录音... 松开发送',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFFEF4444)),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
+          ),
         ],
       ),
     );
