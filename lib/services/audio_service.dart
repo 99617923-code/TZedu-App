@@ -150,14 +150,18 @@ class TZAudioService extends ChangeNotifier {
         }
       });
 
-      // 启动振幅检测
-      _amplitudeTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) async {
+      // 启动振幅检测（降低频率到 300ms，且仅在变化超过阈值时通知 UI，
+      // 避免 iOS 上因高频 notifyListeners 导致计时器显示跳动）
+      _amplitudeTimer = Timer.periodic(const Duration(milliseconds: 300), (timer) async {
         try {
           final amp = await _recorder!.getAmplitude();
           // amp.current 范围是 -160 到 0 (dBFS)，转换为 0-1
           final normalized = ((amp.current + 50) / 50).clamp(0.0, 1.0);
-          _amplitude = normalized;
-          notifyListeners();
+          // 仅在振幅变化超过 0.05 时才刷新 UI，减少不必要的重建
+          if ((normalized - _amplitude).abs() > 0.05) {
+            _amplitude = normalized;
+            notifyListeners();
+          }
         } catch (_) {}
       });
 

@@ -15,6 +15,7 @@
 /// 与 ChatPanel（Mock 版）保持一致的 UI 风格
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -1811,7 +1812,7 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
                 ),
               ),
               const SizedBox(width: 8),
-              // 发送/录音按钮
+              // 发送按钮（有文字时显示）/ 录音按钮（仅移动端，无文字时显示）
               if (hasText)
                 GestureDetector(
                   onTap: _handleSend,
@@ -1825,7 +1826,8 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
                     child: const Icon(Icons.send, size: 18, color: Colors.white),
                   ),
                 )
-              else
+              else if (!kIsWeb && (Platform.isIOS || Platform.isAndroid))
+                // 录音按钮 — 仅移动端显示（桌面端无发语音场景，与微信桌面端一致）
                 GestureDetector(
                   onLongPressStart: (_) => _startRecording(),
                   onLongPressEnd: (_) => _stopRecordingAndSend(),
