@@ -695,12 +695,12 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
           _buildHeader(),
           Expanded(child: _buildMessageList()),
           _buildInputBar(),
-          // 附件面板
-          AnimatedSize(
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeInOut,
-            child: _showAttachPanel ? _buildAttachPanel() : const SizedBox.shrink(),
-          ),
+          // 附件面板（暂时隐藏，待相册/拍照/视频/文件功能完善后恢复）
+          // AnimatedSize(
+          //   duration: const Duration(milliseconds: 200),
+          //   curve: Curves.easeInOut,
+          //   child: _showAttachPanel ? _buildAttachPanel() : const SizedBox.shrink(),
+          // ),
         ],
       ),
     );
@@ -1732,13 +1732,13 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
                     ),
                   ),
                 ),
-              const SizedBox(width: 8),
-              // 附件按钮（+号）
-              _buildInputButton(
-                _showAttachPanel ? Icons.close : Icons.add_circle_outline,
-                _showAttachPanel ? const Color(0xFFEF4444) : const Color(0xFF7C3AED),
-                () => setState(() => _showAttachPanel = !_showAttachPanel),
-              ),
+              // 附件按钮（+号）— 暂时隐藏，待相册/拍照/视频/文件功能完善后恢复
+              // const SizedBox(width: 8),
+              // _buildInputButton(
+              //   _showAttachPanel ? Icons.close : Icons.add_circle_outline,
+              //   _showAttachPanel ? const Color(0xFFEF4444) : const Color(0xFF7C3AED),
+              //   () => setState(() => _showAttachPanel = !_showAttachPanel),
+              // ),
             ],
           ),
           // 录音提示
