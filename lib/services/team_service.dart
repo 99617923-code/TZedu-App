@@ -131,7 +131,7 @@ class TZTeamService extends ChangeNotifier {
         avatar: avatar,
         intro: intro,
         // 高级群默认设置
-        joinMode: NIMTeamJoinMode.joinModeNeedApply, // 需要验证
+        joinMode: NIMTeamJoinMode.joinModeApply, // 需要验证
         agreeMode: NIMTeamAgreeMode.agreeModeNoAuth, // 被邀请人无需同意
         inviteMode: NIMTeamInviteMode.inviteModeAll, // 所有人可邀请
         updateInfoMode: NIMTeamUpdateInfoMode.updateInfoModeManager, // 仅管理员可改群信息
@@ -240,6 +240,7 @@ class TZTeamService extends ChangeNotifier {
 
     try {
       final queryOption = NIMTeamMemberQueryOption(
+        roleQueryType: NIMTeamMemberRoleQueryType.memberRoleQueryTypeAll,
         limit: 200,
         onlyChatBanned: false,
       );
@@ -492,8 +493,8 @@ class TZTeamService extends ChangeNotifier {
 
     try {
       final role = isManager
-          ? NIMTeamMemberRole.teamMemberRoleManager
-          : NIMTeamMemberRole.teamMemberRoleNormal;
+          ? NIMTeamMemberRole.memberRoleManager
+          : NIMTeamMemberRole.memberRoleNormal;
 
       final result = await NimCore.instance.teamService
           .updateTeamMemberRole(
@@ -517,8 +518,8 @@ class TZTeamService extends ChangeNotifier {
 
     try {
       final mode = mute
-          ? NIMTeamChatBannedMode.teamChatBannedModeNormal
-          : NIMTeamChatBannedMode.teamChatBannedModeUnban;
+          ? NIMTeamChatBannedMode.chatBannedModeBannedNormal
+          : NIMTeamChatBannedMode.chatBannedModeNone;
 
       final result = await NimCore.instance.teamService
           .setTeamChatBannedMode(teamId, NIMTeamType.typeNormal, mode);
@@ -545,8 +546,8 @@ class TZTeamService extends ChangeNotifier {
 
   /// 判断当前用户是否是管理员或群主
   bool isManagerOrOwner(NIMTeamMember member) {
-    return member.memberRole == NIMTeamMemberRole.teamMemberRoleOwner ||
-        member.memberRole == NIMTeamMemberRole.teamMemberRoleManager;
+    return member.memberRole == NIMTeamMemberRole.memberRoleOwner ||
+        member.memberRole == NIMTeamMemberRole.memberRoleManager;
   }
 
   /// 同步更新本地会话名称

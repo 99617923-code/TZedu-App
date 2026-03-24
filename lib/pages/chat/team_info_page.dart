@@ -52,8 +52,8 @@ class _TeamInfoPageState extends State<TeamInfoPage> {
   bool get _isManager {
     final myMember = _members.where((m) => m.accountId == _myAccid).firstOrNull;
     if (myMember == null) return false;
-    return myMember.memberRole == NIMTeamMemberRole.teamMemberRoleOwner ||
-        myMember.memberRole == NIMTeamMemberRole.teamMemberRoleManager;
+    return myMember.memberRole == NIMTeamMemberRole.memberRoleOwner ||
+        myMember.memberRole == NIMTeamMemberRole.memberRoleManager;
   }
 
   @override
@@ -493,13 +493,13 @@ class _TeamInfoPageState extends State<TeamInfoPage> {
     if (member.accountId == _myAccid) return;
 
     // 群主不能被操作
-    if (member.memberRole == NIMTeamMemberRole.teamMemberRoleOwner) return;
+    if (member.memberRole == NIMTeamMemberRole.memberRoleOwner) return;
 
     final accid = member.accountId ?? '';
     final userInfo = UserInfoService.instance.getCached(accid);
     final name = member.teamNick ?? userInfo?.name ?? accid;
     final isTargetManager =
-        member.memberRole == NIMTeamMemberRole.teamMemberRoleManager;
+        member.memberRole == NIMTeamMemberRole.memberRoleManager;
 
     showModalBottomSheet(
       context: context,
@@ -769,9 +769,9 @@ class _TeamInfoPageState extends State<TeamInfoPage> {
     final name = member.teamNick ?? userInfo?.name ?? accid;
     final avatar = userInfo?.avatar ?? '';
     final isOwner =
-        member.memberRole == NIMTeamMemberRole.teamMemberRoleOwner;
+        member.memberRole == NIMTeamMemberRole.memberRoleOwner;
     final isManagerRole =
-        member.memberRole == NIMTeamMemberRole.teamMemberRoleManager;
+        member.memberRole == NIMTeamMemberRole.memberRoleManager;
 
     return GestureDetector(
       onLongPress: () => _showMemberActions(member),
@@ -1157,9 +1157,9 @@ class _TeamInfoPageState extends State<TeamInfoPage> {
                   final name = member.teamNick ?? userInfo?.name ?? accid;
                   final avatar = userInfo?.avatar ?? '';
                   final isOwner = member.memberRole ==
-                      NIMTeamMemberRole.teamMemberRoleOwner;
+                      NIMTeamMemberRole.memberRoleOwner;
                   final isManagerRole = member.memberRole ==
-                      NIMTeamMemberRole.teamMemberRoleManager;
+                      NIMTeamMemberRole.memberRoleManager;
 
                   return ListTile(
                     leading: _buildAvatar(avatar, name, 40),
@@ -1232,10 +1232,10 @@ class _TeamInfoPageState extends State<TeamInfoPage> {
     // 过滤掉自己和群主
     final removableMembers = _members.where((m) {
       if (m.accountId == _myAccid) return false;
-      if (m.memberRole == NIMTeamMemberRole.teamMemberRoleOwner) return false;
+      if (m.memberRole == NIMTeamMemberRole.memberRoleOwner) return false;
       // 管理员只能被群主移除
       if (!_isOwner &&
-          m.memberRole == NIMTeamMemberRole.teamMemberRoleManager) {
+          m.memberRole == NIMTeamMemberRole.memberRoleManager) {
         return false;
       }
       return true;
