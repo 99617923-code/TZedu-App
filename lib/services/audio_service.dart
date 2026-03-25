@@ -181,24 +181,17 @@ class TZAudioService extends ChangeNotifier {
       _currentRecordingPath = p.join(dir.path, 'voice_$timestamp.m4a');
 
       // 配置录音参数
-      // 安卓上使用 AAC-LC 编码，兼容性最好
+      // 使用标准 44100Hz 采样率 + 128kbps 码率，兼容性最好
+      // 注意：某些设备不支持低采样率的 AAC-LC 编码，会导致录音无声
       const config = RecordConfig(
         encoder: AudioEncoder.aacLc,
-        sampleRate: 16000,  // 16kHz 对语音消息足够，文件更小
-        bitRate: 64000,     // 64kbps 语音质量足够
-        numChannels: 1,     // 单声道
+        sampleRate: 44100,
+        bitRate: 128000,
+        numChannels: 1, // 单声道，语音消息足够
       );
 
       // 开始录音
       await _recorder!.start(config, path: _currentRecordingPath!);
-
-      // 验证录音是否真的开始了
-      final isActuallyRecording = await _recorder!.isRecording();
-      if (!isActuallyRecording) {
-        _log('录音启动失败：recorder 报告未在录音');
-        _currentRecordingPath = null;
-        return false;
-      }
 
       _state = TZAudioState.recording;
       _recordingSeconds = 0;
