@@ -1,10 +1,13 @@
 /// 语音录制和播放服务
 /// 火鹰科技出品
 ///
-/// 参考网易云信官方 IM UIKit Flutter Demo 实现：
-/// - 录音：flutter_sound（FlutterSoundRecorder）
-/// - 播放：audioplayers（AudioPlayer）
+/// 技术方案：
+/// - 录音：record 包（AudioRecorder）— 全平台支持
+/// - 播放：audioplayers 包（AudioPlayer）— 全平台支持
 /// - 权限：permission_handler
+///
+/// 重要：record 包要求每次录音创建新的 AudioRecorder 实例，
+/// 录音结束后必须 dispose。这是官方文档明确要求的用法。
 ///
 /// 使用方式：
 ///   final service = TZAudioService.instance;
@@ -15,10 +18,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_sound/flutter_sound.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:record/record.dart';
 
 /// 录音结果
 class RecordingResult {
@@ -50,6 +53,16 @@ class TZAudioService extends ChangeNotifier {
   TZAudioService._internal();
 
   // ═══════════════════════════════════════════════════════
+  // 平台判断
+  // ═══════════════════════════════════════════════════════
+
+  /// 是否是移动端（iOS/Android）— 桌面端已隐藏录音按钮
+  bool get _isMobile {
+    if (kIsWeb) return false;
+    return Platform.isIOS || Platform.isAndroid;
+  }
+
+  // ═══════════════════════════════════════════════════════
   // 状态
   // ═══════════════════════════════════════════════════════
 
@@ -76,14 +89,15 @@ class TZAudioService extends ChangeNotifier {
   double get playProgress => _playProgress;
 
   // ═══════════════════════════════════════════════════════
-  // 内部变量 — 录音（flutter_sound，参考官方 Demo）
+  // 内部变量 — 录音（record 包）
   // ═══════════════════════════════════════════════════════
 
-  FlutterSoundRecorder? _recorder;
-  bool _recorderInitialized = false;
-  StreamSubscription? _recorderSubscription;
-  int _recordingDurationMs = 0; // 录音时长（毫秒），由 onProgress 回调更新
-  Timer? _secondsTimer; // 用于 UI 显示的秒数计时器
+  /// 当前录音器实例（每次录音创建新实例，录音结束后 dispose）
+  AudioRecorder? _recorder;
+  Timer? _secondsTimer; // UI 秒数显示
+  Timer? _amplitudeTimer; // 振幅检测
+  DateTime? _recordingStartTime; // 录音开始时间
+  String? _currentRecordingPath; // 当前录音文件路径
 
   /// 最大录音时长（秒）
   static const int maxRecordingDuration = 60;
@@ -91,40 +105,30 @@ class TZAudioService extends ChangeNotifier {
   static const int minRecordingDurationMs = 1000;
 
   // ═══════════════════════════════════════════════════════
-  // 内部变量 — 播放（audioplayers，参考官方 Demo）
+  // 内部变量 — 播放（audioplayers，全平台）
   // ═══════════════════════════════════════════════════════
 
-  /// 播放器 map（和官方一样，用 messageId 作为 key）
-  final Map<String, AudioPlayer> _players = {};
+  AudioPlayer? _currentPlayer;
   StreamSubscription? _playerStateSubscription;
   StreamSubscription? _playerPositionSubscription;
+  StreamSubscription? _playerDurationSubscription;
   Duration? _totalDuration;
 
   // ═══════════════════════════════════════════════════════
   // 初始化
   // ═══════════════════════════════════════════════════════
 
-  /// 初始化录音器（在 app 启动或进入聊天页面时调用）
+  /// 初始化录音器（record 包不需要预初始化，每次录音时创建新实例）
   Future<void> initRecorder() async {
-    try {
-      _recorder = FlutterSoundRecorder();
-      await _recorder!.openRecorder();
-      // 设置录音进度回调间隔（官方用 10ms，我们用 100ms 足够）
-      await _recorder!.setSubscriptionDuration(const Duration(milliseconds: 100));
-      _recorderInitialized = true;
-      _log('录音器初始化成功');
-    } catch (e) {
-      _log('录音器初始化失败: $e');
-      _recorderInitialized = false;
-    }
+    _log('录音器使用 record 包，无需预初始化');
   }
 
-  /// 初始化播放器（参考官方 Demo 的 initAudioPlayer）
+  /// 初始化播放器（全平台）
   void initAudioPlayer() {
     _setupSpeaker();
   }
 
-  /// 设置播放器音频上下文（参考官方 Demo）
+  /// 设置播放器音频上下文
   Future<void> _setupSpeaker() async {
     try {
       final audioContext = AudioContext(
@@ -141,17 +145,17 @@ class TZAudioService extends ChangeNotifier {
       await AudioPlayer.global.setAudioContext(audioContext);
       _log('播放器音频上下文设置成功');
     } catch (e) {
-      _log('设置播放器音频上下文失败: $e');
+      _log('设置播放器音频上下文失败（桌面端可忽略）: $e');
     }
   }
 
   // ═══════════════════════════════════════════════════════
-  // 权限管理（使用 permission_handler，参考官方 Demo）
+  // 权限管理（使用 permission_handler）
   // ═══════════════════════════════════════════════════════
 
   /// 请求麦克风权限
-  /// 返回 true 表示已授权
   Future<bool> requestMicrophonePermission() async {
+    if (!_isMobile) return false;
     try {
       final status = await Permission.microphone.request();
       _log('麦克风权限状态: $status');
@@ -164,71 +168,67 @@ class TZAudioService extends ChangeNotifier {
 
   /// 检查麦克风权限是否已授权
   Future<bool> isMicrophoneGranted() async {
+    if (!_isMobile) return false;
     return await Permission.microphone.isGranted;
   }
 
   /// 检查麦克风权限是否被永久拒绝
   Future<bool> isMicrophonePermanentlyDenied() async {
+    if (!_isMobile) return false;
     return await Permission.microphone.isPermanentlyDenied;
   }
 
   // ═══════════════════════════════════════════════════════
-  // 录音功能（参考官方 Demo 的 record_panel.dart）
+  // 录音功能（使用 record 包，仅移动端）
   // ═══════════════════════════════════════════════════════
 
   /// 开始录音
   Future<bool> startRecording() async {
+    if (!_isMobile) {
+      _log('桌面端不支持录音');
+      return false;
+    }
+
     if (_state != TZAudioState.idle) {
       _log('当前状态不允许录音: $_state');
       return false;
     }
 
-    // 确保录音器已初始化
-    if (!_recorderInitialized || _recorder == null) {
-      await initRecorder();
-    }
-    if (!_recorderInitialized || _recorder == null) {
-      _log('录音器初始化失败，无法录音');
-      return false;
-    }
-
     try {
+      // 每次录音创建全新的 AudioRecorder 实例（record 包官方要求）
+      _recorder?.dispose();
+      _recorder = AudioRecorder();
+
+      // 检查权限（record 包自带的权限检查）
+      final hasPermission = await _recorder!.hasPermission();
+      if (!hasPermission) {
+        _log('没有录音权限');
+        _recorder?.dispose();
+        _recorder = null;
+        return false;
+      }
+
       // 获取临时目录，生成录音文件路径
-      // 官方 Demo 用的是 aacADTS 格式
       final tempDir = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final path = '${tempDir.path}/$timestamp${ext[Codec.aacADTS.index]}';
+      _currentRecordingPath = '${tempDir.path}/tz_audio_$timestamp.m4a';
 
-      // 开始录音（参数完全参考官方 Demo）
-      await _recorder!.startRecorder(
-        toFile: path,
-        codec: Codec.aacADTS,
-        bitRate: 64000,
+      // 录音配置：使用默认的 aacLc 编码，44100Hz，128kbps
+      // 这是 record 包的默认配置，在所有平台上兼容性最好
+      const config = RecordConfig(
+        encoder: AudioEncoder.aacLc,
+        sampleRate: 44100,
+        bitRate: 128000,
         numChannels: 1,
-        sampleRate: 48000,
       );
+
+      // 开始录音
+      await _recorder!.start(config, path: _currentRecordingPath!);
 
       _state = TZAudioState.recording;
       _recordingSeconds = 0;
-      _recordingDurationMs = 0;
       _amplitude = 0.0;
-
-      // 监听录音进度（参考官方 Demo）
-      _recorderSubscription = _recorder!.onProgress!.listen((e) {
-        _recordingDurationMs = e.duration.inMilliseconds;
-
-        // 更新振幅（flutter_sound 的 decibels 范围约 0-120）
-        if (e.decibels != null) {
-          _amplitude = ((e.decibels! - 30) / 70).clamp(0.0, 1.0);
-        }
-
-        // 超过最大时长自动停止
-        if (e.duration.inSeconds >= maxRecordingDuration) {
-          _log('录音达到最大时长，自动停止');
-          // 不在这里直接 stopRecording，通过通知 UI 来处理
-          _secondsTimer?.cancel();
-        }
-      });
+      _recordingStartTime = DateTime.now();
 
       // 启动秒数计时器（用于 UI 显示）
       _secondsTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -236,15 +236,39 @@ class TZAudioService extends ChangeNotifier {
         notifyListeners();
 
         if (_recordingSeconds >= maxRecordingDuration) {
+          _log('录音达到最大时长，自动停止');
           _secondsTimer?.cancel();
         }
       });
 
+      // 启动振幅检测（用于录音波形 UI）
+      _amplitudeTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) async {
+        try {
+          if (_recorder != null && _state == TZAudioState.recording) {
+            final amp = await _recorder!.getAmplitude();
+            // amp.current 是 dBFS，范围约 -160 到 0
+            // 转换为 0.0 - 1.0 的范围
+            final dBFS = amp.current;
+            if (dBFS.isFinite && dBFS > -160) {
+              final newAmplitude = ((dBFS + 50) / 50).clamp(0.0, 1.0);
+              if ((newAmplitude - _amplitude).abs() > 0.03) {
+                _amplitude = newAmplitude;
+                notifyListeners();
+              }
+            }
+          }
+        } catch (_) {
+          // 忽略振幅获取异常
+        }
+      });
+
       notifyListeners();
-      _log('开始录音: $path');
+      _log('开始录音: $_currentRecordingPath');
       return true;
     } catch (e) {
       _log('开始录音失败: $e');
+      _recorder?.dispose();
+      _recorder = null;
       _state = TZAudioState.idle;
       notifyListeners();
       return false;
@@ -260,25 +284,34 @@ class TZAudioService extends ChangeNotifier {
 
     try {
       _secondsTimer?.cancel();
-      _cancelRecorderSubscription();
+      _amplitudeTimer?.cancel();
 
-      // 停止录音，返回文件路径（参考官方 Demo）
-      final filePath = await _recorder!.stopRecorder();
+      // 停止录音，返回文件路径
+      final filePath = await _recorder!.stop();
+
+      // 计算录音时长
+      final durationMs = _recordingStartTime != null
+          ? DateTime.now().difference(_recordingStartTime!).inMilliseconds
+          : 0;
+
+      // dispose 录音器实例（record 包要求）
+      _recorder?.dispose();
+      _recorder = null;
 
       _state = TZAudioState.idle;
       _amplitude = 0.0;
       notifyListeners();
 
-      _log('stopRecorder 返回路径: $filePath, duration: $_recordingDurationMs ms');
+      _log('停止录音, 路径: $filePath, 时长: ${durationMs}ms');
 
       if (filePath == null || filePath.isEmpty) {
         _log('录音文件路径为空');
         return null;
       }
 
-      // 检查最小时长（参考官方 Demo 的 _minLength = 1000ms）
-      if (_recordingDurationMs < minRecordingDurationMs) {
-        _log('录音时长不足 ${minRecordingDurationMs}ms (实际: ${_recordingDurationMs}ms)，取消发送');
+      // 检查最小时长
+      if (durationMs < minRecordingDurationMs) {
+        _log('录音时长不足 ${minRecordingDurationMs}ms (实际: ${durationMs}ms)，取消发送');
         _deleteFile(filePath);
         return null;
       }
@@ -294,18 +327,20 @@ class TZAudioService extends ChangeNotifier {
       _log('录音文件大小: $fileSize bytes');
 
       if (fileSize < 100) {
-        _log('录音文件太小，可能录音失败');
+        _log('录音文件太小（<100 bytes），可能录音失败');
         _deleteFile(filePath);
         return null;
       }
 
       return RecordingResult(
         filePath: filePath,
-        durationMs: _recordingDurationMs,
+        durationMs: durationMs,
         fileSize: fileSize,
       );
     } catch (e) {
       _log('停止录音失败: $e');
+      _recorder?.dispose();
+      _recorder = null;
       _state = TZAudioState.idle;
       notifyListeners();
       return null;
@@ -318,36 +353,32 @@ class TZAudioService extends ChangeNotifier {
 
     try {
       _secondsTimer?.cancel();
-      _cancelRecorderSubscription();
+      _amplitudeTimer?.cancel();
 
-      final filePath = await _recorder!.stopRecorder();
+      // 取消录音（record 包的 cancel 会自动删除文件）
+      await _recorder?.cancel();
 
-      // 删除录音文件
-      if (filePath != null && filePath.isNotEmpty) {
-        _deleteFile(filePath);
-      }
+      // dispose 录音器实例
+      _recorder?.dispose();
+      _recorder = null;
 
       _state = TZAudioState.idle;
       _recordingSeconds = 0;
-      _recordingDurationMs = 0;
       _amplitude = 0.0;
+      _recordingStartTime = null;
       notifyListeners();
       _log('录音已取消');
     } catch (e) {
       _log('取消录音失败: $e');
+      _recorder?.dispose();
+      _recorder = null;
       _state = TZAudioState.idle;
       notifyListeners();
     }
   }
 
-  /// 取消录音进度监听
-  void _cancelRecorderSubscription() {
-    _recorderSubscription?.cancel();
-    _recorderSubscription = null;
-  }
-
   // ═══════════════════════════════════════════════════════
-  // 播放功能（参考官方 Demo 的 audio_player.dart）
+  // 播放功能（audioplayers，全平台）
   // ═══════════════════════════════════════════════════════
 
   /// 播放语音消息
@@ -360,12 +391,10 @@ class TZAudioService extends ChangeNotifier {
       await stopPlaying();
       return;
     }
-
     // 如果正在播放其他消息，先停止
     if (_state == TZAudioState.playing) {
       await stopPlaying();
     }
-
     // 如果正在录音，不允许播放
     if (_state == TZAudioState.recording) {
       _log('录音中，无法播放');
@@ -375,22 +404,11 @@ class TZAudioService extends ChangeNotifier {
     try {
       _setupSpeaker();
 
-      final id = messageId ?? 'default';
+      // 每次播放创建新的 AudioPlayer 实例
+      _currentPlayer?.dispose();
+      _currentPlayer = AudioPlayer();
 
-      // 清理旧的播放器（参考官方 Demo）
-      _players.forEach((key, value) async {
-        if (key != id) {
-          await value.dispose();
-        }
-      });
-      _players.removeWhere((key, value) => key != id);
-
-      // 创建或复用播放器（参考官方 Demo）
-      if (_players[id] == null) {
-        _players[id] = AudioPlayer(playerId: id);
-      }
-
-      final player = _players[id]!;
+      final player = _currentPlayer!;
 
       _log('准备播放: $source');
 
@@ -400,7 +418,7 @@ class TZAudioService extends ChangeNotifier {
       _totalDuration = durationMs != null ? Duration(milliseconds: durationMs) : null;
       notifyListeners();
 
-      // 监听播放状态（参考官方 Demo）
+      // 监听播放状态
       _playerStateSubscription?.cancel();
       _playerStateSubscription = player.onPlayerStateChanged.listen((event) {
         if (event == PlayerState.stopped || event == PlayerState.completed) {
@@ -418,22 +436,14 @@ class TZAudioService extends ChangeNotifier {
       });
 
       // 获取时长
-      _playerPositionSubscription?.cancel();
-      player.onDurationChanged.listen((duration) {
+      _playerDurationSubscription?.cancel();
+      _playerDurationSubscription = player.onDurationChanged.listen((duration) {
         if (_totalDuration == null || _totalDuration!.inMilliseconds == 0) {
           _totalDuration = duration;
         }
       });
 
-      // 重新监听进度
-      _playerPositionSubscription = player.onPositionChanged.listen((position) {
-        if (_totalDuration != null && _totalDuration!.inMilliseconds > 0) {
-          _playProgress = (position.inMilliseconds / _totalDuration!.inMilliseconds).clamp(0.0, 1.0);
-          notifyListeners();
-        }
-      });
-
-      // 播放（参考官方 Demo：先尝试 URL，再尝试本地文件）
+      // 播放（先尝试 URL，再尝试本地文件）
       Source audioSource;
       if (source.startsWith('http://') || source.startsWith('https://')) {
         audioSource = UrlSource(source);
@@ -466,18 +476,18 @@ class TZAudioService extends ChangeNotifier {
     try {
       _playerStateSubscription?.cancel();
       _playerPositionSubscription?.cancel();
+      _playerDurationSubscription?.cancel();
 
-      // 停止所有播放器（参考官方 Demo 的 stopAll）
-      for (var player in _players.values) {
-        await player.stop();
-      }
-    } catch (_) {}
+      await _currentPlayer?.stop();
 
-    _state = TZAudioState.idle;
-    _playingMessageId = null;
-    _playProgress = 0.0;
-    notifyListeners();
-    _log('停止播放');
+      _state = TZAudioState.idle;
+      _playingMessageId = null;
+      _playProgress = 0.0;
+      notifyListeners();
+      _log('停止播放');
+    } catch (e) {
+      _log('停止播放失败: $e');
+    }
   }
 
   /// 播放完成回调
@@ -490,14 +500,17 @@ class TZAudioService extends ChangeNotifier {
   }
 
   // ═══════════════════════════════════════════════════════
-  // 辅助方法
+  // 工具方法
   // ═══════════════════════════════════════════════════════
 
-  /// 安全删除文件
-  Future<void> _deleteFile(String path) async {
+  /// 删除临时文件
+  void _deleteFile(String path) {
     try {
       final file = File(path);
-      if (await file.exists()) await file.delete();
+      if (file.existsSync()) {
+        file.deleteSync();
+        _log('已删除临时文件: $path');
+      }
     } catch (e) {
       _log('删除文件失败: $e');
     }
@@ -507,18 +520,21 @@ class TZAudioService extends ChangeNotifier {
   // 资源释放
   // ═══════════════════════════════════════════════════════
 
-  /// 释放所有资源（参考官方 Demo 的 release）
+  /// 释放所有资源
   void releaseAll() {
     _secondsTimer?.cancel();
-    _cancelRecorderSubscription();
+    _amplitudeTimer?.cancel();
     _playerStateSubscription?.cancel();
     _playerPositionSubscription?.cancel();
+    _playerDurationSubscription?.cancel();
+
+    // 释放录音器
+    _recorder?.dispose();
+    _recorder = null;
 
     // 释放播放器
-    for (var player in _players.values) {
-      player.dispose();
-    }
-    _players.clear();
+    _currentPlayer?.dispose();
+    _currentPlayer = null;
 
     _state = TZAudioState.idle;
     _playingMessageId = null;
@@ -529,20 +545,16 @@ class TZAudioService extends ChangeNotifier {
   @override
   void dispose() {
     _secondsTimer?.cancel();
-    _cancelRecorderSubscription();
+    _amplitudeTimer?.cancel();
     _playerStateSubscription?.cancel();
     _playerPositionSubscription?.cancel();
+    _playerDurationSubscription?.cancel();
 
-    // 释放录音器
-    try {
-      _recorder?.closeRecorder();
-    } catch (_) {}
+    _recorder?.dispose();
+    _recorder = null;
 
-    // 释放播放器
-    for (var player in _players.values) {
-      player.dispose();
-    }
-    _players.clear();
+    _currentPlayer?.dispose();
+    _currentPlayer = null;
 
     super.dispose();
   }
