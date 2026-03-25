@@ -3,6 +3,9 @@
 #
 # nim_core_v2 的 build 脚本依赖 Python requests 模块下载原生 SDK，
 # pre_install hook 会自动检测并安装，开发者无需手动操作。
+#
+# flutter_sound 仅在 iOS/Android 上使用（录音功能），macOS 不需要。
+# macOS 上语音播放由 audioplayers 提供，完全独立于 flutter_sound。
 
 platform :osx, '10.15'
 
@@ -33,11 +36,10 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 flutter_macos_podfile_setup
 
 # ═══════════════════════════════════════════════════════════
-# 自动安装 nim_core_v2 所需的 Python requests 模块
-# 自动修复 flutter_sound 的 podspec 文件名问题
+# Pre-install: 环境准备 & 排除 macOS 不需要的插件
 # ═══════════════════════════════════════════════════════════
 pre_install do |installer|
-  # 检测并安装 Python requests 模块（nim_core_v2 build 脚本需要）
+  # 1. 检测并安装 Python requests 模块（nim_core_v2 build 脚本需要）
   puts "[TZ] 检查 Python requests 模块..."
   result = system('python3 -c "import requests" 2>/dev/null')
   unless result
@@ -48,21 +50,16 @@ pre_install do |installer|
     puts "[TZ] Python requests 模块已存在"
   end
 
-  # 修复 flutter_sound macOS podspec 文件名不匹配问题
-  # flutter_sound 包的 macOS podspec 文件名为 taudio.podspec，
-  # 但 Flutter 插件系统期望找到 flutter_sound.podspec，导致 pod install 失败。
-  # 这里自动创建一个符号链接来修复。
-  symlink_dir = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks', 'plugins', 'flutter_sound', 'macos'), File.dirname(__FILE__))
-  if Dir.exist?(symlink_dir)
-    taudio_podspec = File.join(symlink_dir, 'taudio.podspec')
-    flutter_sound_podspec = File.join(symlink_dir, 'flutter_sound.podspec')
-    if File.exist?(taudio_podspec) && !File.exist?(flutter_sound_podspec)
-      puts "[TZ] 修复 flutter_sound macOS podspec: 创建 flutter_sound.podspec -> taudio.podspec"
-      File.symlink(taudio_podspec, flutter_sound_podspec)
-      puts "[TZ] ✅ flutter_sound macOS podspec 修复完成"
-    else
-      puts "[TZ] flutter_sound macOS podspec 无需修复"
-    end
+  # 2. 排除 flutter_sound 插件（macOS 不需要录音功能）
+  #    flutter_sound 的 macOS podspec 文件名为 taudio.podspec（与包名不一致），
+  #    导致 CocoaPods 找不到 flutter_sound.podspec 而报错。
+  #    且 macOS 上只需要 audioplayers 做语音播放，不需要 flutter_sound。
+  #    直接删除 symlink 目录，使 pod install 跳过此插件。
+  plugins_dir = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks', 'plugins'), File.dirname(__FILE__))
+  flutter_sound_dir = File.join(plugins_dir, 'flutter_sound')
+  if File.exist?(flutter_sound_dir) || File.symlink?(flutter_sound_dir)
+    FileUtils.rm_rf(flutter_sound_dir)
+    puts "[TZ] ✅ 已排除 flutter_sound 插件（macOS 不需要录音功能）"
   end
 end
 
