@@ -33,9 +33,6 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^5.0.0
 
-# 与官方 Demo 一致，禁用 flutter_sound_web
-dependency_overrides:
-  flutter_sound_web: null
 
 flutter:
   uses-material-design: true

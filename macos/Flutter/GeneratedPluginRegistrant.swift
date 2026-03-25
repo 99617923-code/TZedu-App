@@ -6,7 +6,12 @@ import FlutterMacOS
 import Foundation
 
 import alog_macos
+import audioplayers_darwin
+import file_picker
+import file_selector_macos
+import flutter_sound
 import nim_core_v2_macos
+import open_file_mac
 import package_info_plus
 import path_provider_foundation
 import shared_preferences_foundation
@@ -15,7 +20,12 @@ import url_launcher_macos
 
 func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   AlogMacosPlugin.register(with: registry.registrar(forPlugin: "AlogMacosPlugin"))
+  AudioplayersDarwinPlugin.register(with: registry.registrar(forPlugin: "AudioplayersDarwinPlugin"))
+  FilePickerPlugin.register(with: registry.registrar(forPlugin: "FilePickerPlugin"))
+  FileSelectorPlugin.register(with: registry.registrar(forPlugin: "FileSelectorPlugin"))
+  FlutterSoundPlugin.register(with: registry.registrar(forPlugin: "FlutterSoundPlugin"))
   NimCoreMacosPlugin.register(with: registry.registrar(forPlugin: "NimCoreMacosPlugin"))
+  OpenFilePlugin.register(with: registry.registrar(forPlugin: "OpenFilePlugin"))
   FPPPackageInfoPlusPlugin.register(with: registry.registrar(forPlugin: "FPPPackageInfoPlusPlugin"))
   PathProviderPlugin.register(with: registry.registrar(forPlugin: "PathProviderPlugin"))
   SharedPreferencesPlugin.register(with: registry.registrar(forPlugin: "SharedPreferencesPlugin"))

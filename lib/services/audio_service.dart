@@ -32,9 +32,6 @@ import 'package:audioplayers/audioplayers.dart';
 import 'audio_record_stub.dart'
     if (dart.library.io) 'audio_record_mobile.dart' as recorder;
 
-// 重新导出 RecordingResult，让外部文件可以使用
-export 'audio_record_stub.dart' show RecordingResult
-    if (dart.library.io) 'audio_record_mobile.dart' show RecordingResult;
 
 /// 语音服务状态
 enum TZAudioState {
