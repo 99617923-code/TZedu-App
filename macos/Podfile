@@ -4,8 +4,9 @@
 # nim_core_v2 的 build 脚本依赖 Python requests 模块下载原生 SDK，
 # pre_install hook 会自动检测并安装，开发者无需手动操作。
 #
-# flutter_sound 仅在 iOS/Android 上使用（录音功能），macOS 不需要。
-# macOS 上语音播放由 audioplayers 提供，完全独立于 flutter_sound。
+# flutter_sound 仅在 iOS/Android 上使用（录音功能），macOS 上语音播放
+# 由 audioplayers 提供。flutter_sound 的 macOS podspec 文件名为
+# taudio.podspec（与包名不一致），需要创建符号链接修复。
 
 platform :osx, '10.15'
 
@@ -36,17 +37,26 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 flutter_macos_podfile_setup
 
 # ═══════════════════════════════════════════════════════════
-# 排除 macOS 不需要的插件（在 Analyzing dependencies 之前执行）
+# 修复 flutter_sound macOS podspec 文件名不匹配问题
 # ═══════════════════════════════════════════════════════════
-# flutter_sound 的 macOS podspec 文件名为 taudio.podspec（与包名不一致），
-# 导致 CocoaPods 报错 No podspec found for flutter_sound。
-# 且 macOS 上只需要 audioplayers 做语音播放，不需要 flutter_sound 录音。
-# 在顶层代码中删除 symlink，确保在 CocoaPods 分析依赖之前执行。
-require 'fileutils'
-flutter_sound_symlink = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks', 'plugins', 'flutter_sound'), File.dirname(__FILE__))
-if File.exist?(flutter_sound_symlink) || File.symlink?(flutter_sound_symlink)
-  FileUtils.rm_rf(flutter_sound_symlink)
-  puts "[TZ] ✅ 已排除 flutter_sound 插件（macOS 不需要录音功能）"
+# flutter_sound 包的 macOS podspec 实际文件名为 taudio.podspec，
+# 但 Flutter 插件系统和 CocoaPods 期望找到 flutter_sound.podspec。
+# 此方法在 flutter_install_all_macos_pods 之后调用，
+# 在 symlinks 目录中创建正确名称的 podspec 符号链接。
+def fix_flutter_sound_podspec_macos(application_path)
+  require 'fileutils'
+  symlink_plugins_dir = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks', 'plugins'), application_path)
+  flutter_sound_macos = File.join(symlink_plugins_dir, 'flutter_sound', 'macos')
+  if Dir.exist?(flutter_sound_macos)
+    taudio_podspec = File.join(flutter_sound_macos, 'taudio.podspec')
+    flutter_sound_podspec = File.join(flutter_sound_macos, 'flutter_sound.podspec')
+    if File.exist?(taudio_podspec) && !File.exist?(flutter_sound_podspec)
+      FileUtils.cp(taudio_podspec, flutter_sound_podspec)
+      puts "[TZ] ✅ 修复 flutter_sound macOS podspec: 复制 taudio.podspec -> flutter_sound.podspec"
+    else
+      puts "[TZ] flutter_sound macOS podspec 无需修复"
+    end
+  end
 end
 
 # ═══════════════════════════════════════════════════════════
@@ -69,6 +79,11 @@ target 'Runner' do
   use_modular_headers!
 
   flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
+
+  # flutter_install_all_macos_pods 内部会重建 symlinks 目录并调用 pod，
+  # 但 CocoaPods 的 Analyzing dependencies 在整个 Podfile 解析完成后才执行。
+  # 所以在这里修复 podspec 文件名，CocoaPods 分析时就能找到正确的文件。
+  fix_flutter_sound_podspec_macos(File.dirname(File.realpath(__FILE__)))
 end
 
 post_install do |installer|
