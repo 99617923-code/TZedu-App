@@ -442,13 +442,41 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     final audioService = TZAudioService.instance;
     final started = await audioService.startRecording();
     if (!started && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('无法录音，请检查麦克风权限'),
-          backgroundColor: Color(0xFFEF4444),
-        ),
-      );
+      // 检查权限状态，给出更精确的提示
+      final permStatus = audioService.lastPermissionStatus;
+      if (permStatus == TZAudioPermissionStatus.permanentlyDenied) {
+        // 权限被永久拒绝，引导用户去设置页面
+        _showPermissionDeniedDialog();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('无法录音，请允许麦克风权限后重试'),
+            backgroundColor: Color(0xFFEF4444),
+          ),
+        );
+      }
     }
+  }
+
+  /// 显示权限被拒绝的引导弹窗
+  void _showPermissionDeniedDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('需要麦克风权限'),
+        content: const Text(
+          '录音功能需要麦克风权限。\n\n'
+          '请前往系统设置 → 应用管理 → 途正教育 → 权限，\n'
+          '开启“麦克风”权限后重试。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('我知道了'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 停止录音并发送
@@ -457,18 +485,21 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     final result = await audioService.stopRecording();
 
     if (result == null) {
-      // 录音时间太短或失败
+      // 录音时间太短、文件无效或失败
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('录音时间太短，请长按录音'),
+            content: Text('录音失败，请长按录音并确保已授予麦克风权限'),
             backgroundColor: Color(0xFFF59E0B),
-            duration: Duration(seconds: 1),
+            duration: Duration(seconds: 2),
           ),
         );
       }
       return;
     }
+
+    debugPrint('[ChatPanelIM] 录音文件: ${result.filePath}, '
+        '大小: ${result.fileSize} bytes, 时长: ${result.durationMs}ms');
 
     // 计算时长（毫秒转秒，向上取整，至少 1 秒）
     final durationSeconds = (result.durationMs / 1000).ceil().clamp(1, 60);
@@ -523,9 +554,19 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
   Future<void> _playAudioMessage(TZMessage msg) async {
     final audioUrl = msg.audioUrl;
     if (audioUrl == null || audioUrl.isEmpty) {
-      debugPrint('[ChatPanelIM] 语音消息没有 URL');
+      debugPrint('[ChatPanelIM] 语音消息没有 URL, messageId: ${msg.messageId}');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('语音消息加载失败'),
+            backgroundColor: Color(0xFFEF4444),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
       return;
     }
+    debugPrint('[ChatPanelIM] 播放语音: $audioUrl');
     await TZAudioService.instance.playAudio(audioUrl, messageId: msg.messageId);
   }
 

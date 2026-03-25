@@ -21,6 +21,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:nim_core_v2/nim_core.dart';
@@ -332,7 +333,7 @@ class ChatMessageService extends ChangeNotifier {
   }
 
   /// 发送语音消息
-  Future<TZMessage?> sendAudioMessage(
+    Future<TZMessage?> sendAudioMessage(
     String conversationId,
     String audioPath,
     int duration,
@@ -341,10 +342,20 @@ class ChatMessageService extends ChangeNotifier {
       _log('IM 未就绪，无法发送语音消息');
       return null;
     }
-
     try {
-      _log('发送语音消息到: $conversationId');
-
+      // 验证音频文件
+      final audioFile = File(audioPath);
+      if (!await audioFile.exists()) {
+        _log('音频文件不存在: $audioPath');
+        return null;
+      }
+      final fileSize = await audioFile.length();
+      _log('发送语音消息到: $conversationId, 文件: $audioPath, '
+          '大小: ${fileSize}bytes, 时长: ${duration}ms');
+      if (fileSize < 1024) {
+        _log('音频文件太小 ($fileSize bytes)，可能录音失败');
+        return null;
+      }
       final createResult = await MessageCreator.createAudioMessage(
         audioPath,
         null, // name
