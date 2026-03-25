@@ -36,10 +36,23 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 flutter_macos_podfile_setup
 
 # ═══════════════════════════════════════════════════════════
-# Pre-install: 环境准备 & 排除 macOS 不需要的插件
+# 排除 macOS 不需要的插件（在 Analyzing dependencies 之前执行）
+# ═══════════════════════════════════════════════════════════
+# flutter_sound 的 macOS podspec 文件名为 taudio.podspec（与包名不一致），
+# 导致 CocoaPods 报错 No podspec found for flutter_sound。
+# 且 macOS 上只需要 audioplayers 做语音播放，不需要 flutter_sound 录音。
+# 在顶层代码中删除 symlink，确保在 CocoaPods 分析依赖之前执行。
+require 'fileutils'
+flutter_sound_symlink = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks', 'plugins', 'flutter_sound'), File.dirname(__FILE__))
+if File.exist?(flutter_sound_symlink) || File.symlink?(flutter_sound_symlink)
+  FileUtils.rm_rf(flutter_sound_symlink)
+  puts "[TZ] ✅ 已排除 flutter_sound 插件（macOS 不需要录音功能）"
+end
+
+# ═══════════════════════════════════════════════════════════
+# 自动安装 nim_core_v2 所需的 Python requests 模块
 # ═══════════════════════════════════════════════════════════
 pre_install do |installer|
-  # 1. 检测并安装 Python requests 模块（nim_core_v2 build 脚本需要）
   puts "[TZ] 检查 Python requests 模块..."
   result = system('python3 -c "import requests" 2>/dev/null')
   unless result
@@ -48,18 +61,6 @@ pre_install do |installer|
     puts "[TZ] Python requests 模块安装完成"
   else
     puts "[TZ] Python requests 模块已存在"
-  end
-
-  # 2. 排除 flutter_sound 插件（macOS 不需要录音功能）
-  #    flutter_sound 的 macOS podspec 文件名为 taudio.podspec（与包名不一致），
-  #    导致 CocoaPods 找不到 flutter_sound.podspec 而报错。
-  #    且 macOS 上只需要 audioplayers 做语音播放，不需要 flutter_sound。
-  #    直接删除 symlink 目录，使 pod install 跳过此插件。
-  plugins_dir = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks', 'plugins'), File.dirname(__FILE__))
-  flutter_sound_dir = File.join(plugins_dir, 'flutter_sound')
-  if File.exist?(flutter_sound_dir) || File.symlink?(flutter_sound_dir)
-    FileUtils.rm_rf(flutter_sound_dir)
-    puts "[TZ] ✅ 已排除 flutter_sound 插件（macOS 不需要录音功能）"
   end
 end
 
