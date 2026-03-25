@@ -35,50 +35,8 @@ flutter_macos_podfile_setup
 
 # ═══════════════════════════════════════════════════════════
 # macOS 上需要跳过的插件列表
-# flutter_sound 的 macOS podspec 有 bug，且 macOS 不需要录音功能
 # ═══════════════════════════════════════════════════════════
 MACOS_SKIP_PLUGINS = ['flutter_sound']
-
-# 自定义 pod 安装方法：基于 Flutter 官方 flutter_install_plugin_pods，
-# 但跳过 MACOS_SKIP_PLUGINS 中列出的插件
-def flutter_install_macos_pods_excluding(application_path)
-  application_path ||= File.dirname(defined_in_file.realpath) if respond_to?(:defined_in_file)
-  raise 'Could not find application path' unless application_path
-
-  symlink_dir = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks'), application_path)
-  system('rm', '-rf', symlink_dir)
-  symlink_plugins_dir = File.expand_path('plugins', symlink_dir)
-  system('mkdir', '-p', symlink_plugins_dir)
-
-  plugins_file = File.join(application_path, '..', '.flutter-plugins-dependencies')
-  dependencies_hash = flutter_parse_plugins_file(plugins_file)
-  plugin_pods = flutter_get_plugins_list(dependencies_hash, 'macos')
-
-  plugin_pods.each do |plugin_hash|
-    plugin_name = plugin_hash['name']
-    plugin_path = plugin_hash['path']
-    has_native_build = plugin_hash.fetch('native_build', true)
-    shared_darwin_source = plugin_hash.fetch('shared_darwin_source', false)
-    platform_directory = shared_darwin_source ? 'darwin' : 'macos'
-
-    next unless plugin_name && plugin_path && has_native_build
-
-    # 跳过不需要的插件
-    if MACOS_SKIP_PLUGINS.include?(plugin_name)
-      puts "[TZ] ⏭️  跳过 macOS 插件: #{plugin_name}（不需要）"
-      next
-    end
-
-    symlink = File.join(symlink_plugins_dir, plugin_name)
-    File.symlink(plugin_path, symlink)
-
-    relative = flutter_relative_path_from_podfile(symlink)
-    pod plugin_name, path: File.join(relative, platform_directory)
-  end
-
-  # FlutterMacOS pod
-  pod 'FlutterMacOS', path: File.join('Flutter', 'ephemeral')
-end
 
 # ═══════════════════════════════════════════════════════════
 # 自动安装 nim_core_v2 所需的 Python requests 模块
@@ -99,8 +57,40 @@ target 'Runner' do
   use_frameworks!
   use_modular_headers!
 
-  # 使用自定义方法安装 pods，跳过 flutter_sound
-  flutter_install_macos_pods_excluding(File.dirname(File.realpath(__FILE__)))
+  # 1. 安装 FlutterMacOS 引擎 pod（官方方法，会生成 FlutterMacOS.podspec）
+  flutter_install_macos_engine_pod
+
+  # 2. 自定义安装插件 pods，跳过 MACOS_SKIP_PLUGINS 中列出的插件
+  #    基于 Flutter 官方 flutter_install_plugin_pods，但增加了跳过逻辑
+  app_path = File.dirname(File.realpath(__FILE__))
+  symlink_dir = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks'), app_path)
+  system('rm', '-rf', symlink_dir)
+  symlink_plugins_dir = File.expand_path('plugins', symlink_dir)
+  system('mkdir', '-p', symlink_plugins_dir)
+
+  plugins_file = File.join(app_path, '..', '.flutter-plugins-dependencies')
+  dependencies_hash = flutter_parse_plugins_file(plugins_file)
+  plugin_pods = flutter_get_plugins_list(dependencies_hash, 'macos')
+
+  plugin_pods.each do |plugin_hash|
+    plugin_name = plugin_hash['name']
+    plugin_path = plugin_hash['path']
+    has_native_build = plugin_hash.fetch('native_build', true)
+    shared_darwin_source = plugin_hash.fetch('shared_darwin_source', false)
+    platform_directory = shared_darwin_source ? 'darwin' : 'macos'
+
+    next unless plugin_name && plugin_path && has_native_build
+
+    if MACOS_SKIP_PLUGINS.include?(plugin_name)
+      puts "[TZ] ⏭️  跳过 macOS 插件: #{plugin_name}（不需要）"
+      next
+    end
+
+    symlink = File.join(symlink_plugins_dir, plugin_name)
+    File.symlink(plugin_path, symlink)
+    relative = flutter_relative_path_from_podfile(symlink)
+    pod plugin_name, path: File.join(relative, platform_directory)
+  end
 end
 
 post_install do |installer|
