@@ -7,6 +7,10 @@
 /// 3. 管理录音和播放状态
 /// 4. 安卓权限管理（录音权限检测与引导）
 ///
+/// 关键设计：
+/// - AudioRecorder 每次录音创建新实例，录音结束后 dispose（官方推荐用法）
+/// - AudioPlayer 每次播放前重新创建，避免安卓上播放器状态异常
+///
 /// 使用方式：
 ///   final service = TZAudioService.instance;
 ///   await service.startRecording();
@@ -95,6 +99,7 @@ class TZAudioService extends ChangeNotifier {
   // 内部变量
   // ═══════════════════════════════════════════════════════
 
+  /// 当前录音器实例（每次录音创建新实例，录音结束后 dispose）
   AudioRecorder? _recorder;
   AudioPlayer? _player;
   Timer? _recordingTimer;
@@ -122,8 +127,10 @@ class TZAudioService extends ChangeNotifier {
   /// 返回权限状态，调用者根据状态决定是否引导用户去设置页面
   Future<TZAudioPermissionStatus> checkPermission() async {
     try {
-      _recorder ??= AudioRecorder();
-      final hasPermission = await _recorder!.hasPermission();
+      // 用临时实例检查权限，检查完立即 dispose
+      final tempRecorder = AudioRecorder();
+      final hasPermission = await tempRecorder.hasPermission();
+      await tempRecorder.dispose();
 
       if (hasPermission) {
         _lastPermissionStatus = TZAudioPermissionStatus.granted;
@@ -131,9 +138,6 @@ class TZAudioService extends ChangeNotifier {
         _log('麦克风权限已授予');
       } else {
         _permissionRequestCount++;
-        // 安卓上，如果请求了多次仍然被拒绝，很可能是永久拒绝
-        // record 包的 hasPermission() 会自动触发系统权限弹窗
-        // 如果弹窗不再出现（第2次+），说明用户选了"不再询问"
         if (_permissionRequestCount >= 2) {
           _lastPermissionStatus = TZAudioPermissionStatus.permanentlyDenied;
           _log('麦克风权限被永久拒绝（请求次数: $_permissionRequestCount）');
@@ -166,14 +170,28 @@ class TZAudioService extends ChangeNotifier {
     }
 
     try {
-      _recorder ??= AudioRecorder();
+      // ═══ 关键修复：每次录音创建全新的 AudioRecorder 实例 ═══
+      // 安卓上复用旧的 AudioRecorder 实例可能导致录音无声
+      // 官方示例也是每次 new AudioRecorder()
+      await _disposeRecorder();
+      _recorder = AudioRecorder();
 
-      // 检查权限
-      final permStatus = await checkPermission();
-      if (permStatus != TZAudioPermissionStatus.granted) {
-        _log('没有麦克风权限，状态: $permStatus');
+      // 检查权限（直接用新创建的 recorder 检查）
+      final hasPermission = await _recorder!.hasPermission();
+      if (!hasPermission) {
+        _permissionRequestCount++;
+        if (_permissionRequestCount >= 2) {
+          _lastPermissionStatus = TZAudioPermissionStatus.permanentlyDenied;
+        } else {
+          _lastPermissionStatus = TZAudioPermissionStatus.denied;
+        }
+        _log('没有麦克风权限，状态: $_lastPermissionStatus');
+        // 权限检查失败，dispose 掉刚创建的 recorder
+        await _disposeRecorder();
         return false;
       }
+      _lastPermissionStatus = TZAudioPermissionStatus.granted;
+      _permissionRequestCount = 0;
 
       // 获取临时目录
       final dir = await getTemporaryDirectory();
@@ -182,7 +200,6 @@ class TZAudioService extends ChangeNotifier {
 
       // 配置录音参数
       // 使用标准 44100Hz 采样率 + 128kbps 码率，兼容性最好
-      // 注意：某些设备不支持低采样率的 AAC-LC 编码，会导致录音无声
       const config = RecordConfig(
         encoder: AudioEncoder.aacLc,
         sampleRate: 44100,
@@ -191,6 +208,7 @@ class TZAudioService extends ChangeNotifier {
       );
 
       // 开始录音
+      _log('准备开始录音: $_currentRecordingPath');
       await _recorder!.start(config, path: _currentRecordingPath!);
 
       _state = TZAudioState.recording;
@@ -213,6 +231,7 @@ class TZAudioService extends ChangeNotifier {
       // 启动振幅检测（降低频率到 300ms，且仅在变化超过阈值时通知 UI，
       // 避免 iOS 上因高频 notifyListeners 导致计时器显示跳动）
       _amplitudeTimer = Timer.periodic(const Duration(milliseconds: 300), (timer) async {
+        if (_recorder == null) return;
         try {
           final amp = await _recorder!.getAmplitude();
           // amp.current 范围是 -160 到 0 (dBFS)，转换为 0-1
@@ -226,12 +245,13 @@ class TZAudioService extends ChangeNotifier {
       });
 
       notifyListeners();
-      _log('开始录音: $_currentRecordingPath');
+      _log('开始录音成功: $_currentRecordingPath');
       return true;
     } catch (e) {
       _log('开始录音失败: $e');
       _state = TZAudioState.idle;
       _currentRecordingPath = null;
+      await _disposeRecorder();
       notifyListeners();
       return false;
     }
@@ -249,6 +269,9 @@ class TZAudioService extends ChangeNotifier {
       _amplitudeTimer?.cancel();
 
       final filePath = await _recorder!.stop();
+
+      // ═══ 关键：录音结束后立即 dispose recorder ═══
+      await _disposeRecorder();
 
       // 计算实际录音时长
       final durationMs = _recordingStartTime != null
@@ -272,7 +295,7 @@ class TZAudioService extends ChangeNotifier {
         return null;
       }
 
-      // ═══ 关键修复：验证录音文件大小 ═══
+      // 验证录音文件大小
       final file = File(filePath);
       if (!await file.exists()) {
         _log('录音文件不存在: $filePath');
@@ -297,6 +320,7 @@ class TZAudioService extends ChangeNotifier {
     } catch (e) {
       _log('停止录音失败: $e');
       _state = TZAudioState.idle;
+      await _disposeRecorder();
       notifyListeners();
       return null;
     }
@@ -317,6 +341,9 @@ class TZAudioService extends ChangeNotifier {
         _deleteFile(filePath);
       }
 
+      // dispose recorder
+      await _disposeRecorder();
+
       _state = TZAudioState.idle;
       _recordingSeconds = 0;
       _amplitude = 0.0;
@@ -326,6 +353,7 @@ class TZAudioService extends ChangeNotifier {
     } catch (e) {
       _log('取消录音失败: $e');
       _state = TZAudioState.idle;
+      await _disposeRecorder();
       notifyListeners();
     }
   }
@@ -356,9 +384,7 @@ class TZAudioService extends ChangeNotifier {
     }
 
     try {
-      // ═══ 关键修复：每次播放前重新创建 AudioPlayer ═══
-      // 安卓上 AudioPlayer 在某些情况下会进入错误状态，
-      // 重新创建可以避免"播放无声"的问题
+      // 每次播放前重新创建 AudioPlayer
       await _disposePlayer();
       _player = AudioPlayer();
 
@@ -460,6 +486,16 @@ class TZAudioService extends ChangeNotifier {
     } catch (e) {
       _log('删除文件失败: $e');
     }
+  }
+
+  /// 安全释放录音器
+  Future<void> _disposeRecorder() async {
+    try {
+      await _recorder?.dispose();
+    } catch (e) {
+      _log('释放录音器异常: $e');
+    }
+    _recorder = null;
   }
 
   /// 释放播放器资源
