@@ -28,6 +28,8 @@ import '../../services/chat_message_service.dart';
 import '../../services/user_info_service.dart';
 import '../../services/conversation_service.dart';
 import '../../services/notification_service.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:fluttertoast/fluttertoast.dart';
 import '../../services/audio_service.dart';
 import '../../services/team_service.dart';
 import 'team_info_page.dart';
@@ -74,6 +76,9 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     AppNotificationService.instance.setActiveConversation(widget.conversationId);
     // 设置会话服务的活跃会话，避免重复增加未读数
     TZConversationService.instance.setActiveConversation(widget.conversationId);
+    // 初始化录音器和播放器（参考官方 Demo）
+    TZAudioService.instance.initRecorder();
+    TZAudioService.instance.initAudioPlayer();
     _loadConversationInfo();
     _loadHistoryMessages();
     _listenNewMessages();
@@ -101,8 +106,8 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     // 清除活跃会话，恢复通知显示
     AppNotificationService.instance.setActiveConversation(null);
     TZConversationService.instance.setActiveConversation(null);
-    // 停止录音和播放
-    TZAudioService.instance.stopPlaying();
+    // 释放录音和播放资源（参考官方 Demo）
+    TZAudioService.instance.releaseAll();
     _inputController.dispose();
     _scrollController.dispose();
     _messageSub?.cancel();
@@ -438,23 +443,28 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
   // ═══════════════════════════════════════════════════════
 
   /// 开始录音
-  Future<void> _startRecording() async {
+   Future<void> _startRecording() async {
     final audioService = TZAudioService.instance;
-    final started = await audioService.startRecording();
-    if (!started && mounted) {
-      // 检查权限状态，给出更精确的提示
-      final permStatus = audioService.lastPermissionStatus;
-      if (permStatus == TZAudioPermissionStatus.permanentlyDenied) {
-        // 权限被永久拒绝，引导用户去设置页面
+
+    // 先检查并请求麦克风权限（参考官方 Demo 使用 permission_handler）
+    final hasPermission = await audioService.requestMicrophonePermission();
+    if (!hasPermission) {
+      // 检查是否被永久拒绝
+      final isPermanentlyDenied = await audioService.isMicrophonePermanentlyDenied();
+      if (isPermanentlyDenied) {
         _showPermissionDeniedDialog();
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('无法录音，请允许麦克风权限后重试'),
-            backgroundColor: Color(0xFFEF4444),
-          ),
-        );
+        Fluttertoast.showToast(msg: '请允许麦克风权限后重试');
       }
+      return;
+    }
+
+    // 停止当前播放（参考官方 Demo）
+    await audioService.stopPlaying();
+
+    final started = await audioService.startRecording();
+    if (!started && mounted) {
+      Fluttertoast.showToast(msg: '录音启动失败，请重试');
     }
   }
 
@@ -466,13 +476,19 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
         title: const Text('需要麦克风权限'),
         content: const Text(
           '录音功能需要麦克风权限。\n\n'
-          '请前往系统设置 → 应用管理 → 途正教育 → 权限，\n'
-          '开启“麦克风”权限后重试。',
+          '请前往系统设置开启“麦克风”权限后重试。',
         ),
         actions: [
           TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              openAppSettings(); // permission_handler 提供的跳转系统设置
+            },
+            child: const Text('去设置'),
+          ),
+          TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('我知道了'),
+            child: const Text('取消'),
           ),
         ],
       ),
@@ -485,16 +501,8 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     final result = await audioService.stopRecording();
 
     if (result == null) {
-      // 录音时间太短、文件无效或失败
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('录音失败，请长按录音并确保已授予麦克风权限'),
-            backgroundColor: Color(0xFFF59E0B),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
+      // 录音时间太短或失败（参考官方 Demo 使用 Fluttertoast）
+      Fluttertoast.showToast(msg: '说话时间太短');
       return;
     }
 
@@ -550,24 +558,41 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     await TZAudioService.instance.cancelRecording();
   }
 
-  /// 播放语音消息
+  /// 播放语音消息（参考官方 Demo：先尝试本地文件，再回退到 URL）
   Future<void> _playAudioMessage(TZMessage msg) async {
-    final audioUrl = msg.audioUrl;
-    if (audioUrl == null || audioUrl.isEmpty) {
-      debugPrint('[ChatPanelIM] 语音消息没有 URL, messageId: ${msg.messageId}');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('语音消息加载失败'),
-            backgroundColor: Color(0xFFEF4444),
-            duration: Duration(seconds: 1),
-          ),
-        );
+    // 优先使用本地文件路径（NIM SDK 会自动下载到本地）
+    String? source = msg.audioUrl;
+    
+    // 尝试从 NIM 消息附件获取本地路径
+    if (msg.raw != null) {
+      final attachment = msg.raw!.attachment;
+      if (attachment is NIMMessageAudioAttachment) {
+        // 先尝试本地路径
+        if (attachment.path != null && attachment.path!.isNotEmpty) {
+          final localFile = File(attachment.path!);
+          if (await localFile.exists()) {
+            source = attachment.path!;
+            debugPrint('[ChatPanelIM] 使用本地音频文件: $source');
+          }
+        }
+        // 本地没有则用 URL
+        source ??= attachment.url;
       }
+    }
+    
+    if (source == null || source.isEmpty) {
+      debugPrint('[ChatPanelIM] 语音消息没有可用源, messageId: ${msg.messageId}');
+      Fluttertoast.showToast(msg: '语音消息加载失败');
       return;
     }
-    debugPrint('[ChatPanelIM] 播放语音: $audioUrl');
-    await TZAudioService.instance.playAudio(audioUrl, messageId: msg.messageId);
+    
+    debugPrint('[ChatPanelIM] 播放语音: $source');
+    final durationMs = (msg.audioDuration ?? 0) * 1000;
+    await TZAudioService.instance.playAudio(
+      source, 
+      messageId: msg.messageId,
+      durationMs: durationMs > 0 ? durationMs : null,
+    );
   }
 
   /// 重发失败的消息

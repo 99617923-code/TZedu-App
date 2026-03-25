@@ -1,29 +1,24 @@
 /// 语音录制和播放服务
 /// 火鹰科技出品
 ///
-/// 职责：
-/// 1. 录制语音消息（使用 record 包，全平台支持）
-/// 2. 播放语音消息（使用 just_audio 包，全平台支持）
-/// 3. 管理录音和播放状态
-/// 4. 安卓权限管理（录音权限检测与引导）
-///
-/// 关键设计：
-/// - AudioRecorder 每次录音创建新实例，录音结束后 dispose（官方推荐用法）
-/// - AudioPlayer 每次播放前重新创建，避免安卓上播放器状态异常
+/// 参考网易云信官方 IM UIKit Flutter Demo 实现：
+/// - 录音：flutter_sound（FlutterSoundRecorder）
+/// - 播放：audioplayers（AudioPlayer）
+/// - 权限：permission_handler
 ///
 /// 使用方式：
 ///   final service = TZAudioService.instance;
 ///   await service.startRecording();
 ///   final result = await service.stopRecording();
-///   await service.playAudio(url);
+///   await service.playAudio(url, messageId: id);
 
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:record/record.dart';
-import 'package:just_audio/just_audio.dart';
+import 'package:flutter_sound/flutter_sound.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as p;
+import 'package:permission_handler/permission_handler.dart';
 
 /// 录音结果
 class RecordingResult {
@@ -40,17 +35,9 @@ class RecordingResult {
 
 /// 语音服务状态
 enum TZAudioState {
-  idle,       // 空闲
-  recording,  // 录音中
-  playing,    // 播放中
-}
-
-/// 权限状态
-enum TZAudioPermissionStatus {
-  granted,          // 已授权
-  denied,           // 被拒绝（可再次请求）
-  permanentlyDenied, // 永久拒绝（需要去设置页面）
-  unknown,          // 未知
+  idle, // 空闲
+  recording, // 录音中
+  playing, // 播放中
 }
 
 class TZAudioService extends ChangeNotifier {
@@ -88,170 +75,177 @@ class TZAudioService extends ChangeNotifier {
   double _playProgress = 0.0;
   double get playProgress => _playProgress;
 
-  /// 最后一次权限检查结果
-  TZAudioPermissionStatus _lastPermissionStatus = TZAudioPermissionStatus.unknown;
-  TZAudioPermissionStatus get lastPermissionStatus => _lastPermissionStatus;
-
-  /// 权限请求次数（用于判断是否永久拒绝）
-  int _permissionRequestCount = 0;
-
   // ═══════════════════════════════════════════════════════
-  // 内部变量
+  // 内部变量 — 录音（flutter_sound，参考官方 Demo）
   // ═══════════════════════════════════════════════════════
 
-  /// 当前录音器实例（每次录音创建新实例，录音结束后 dispose）
-  AudioRecorder? _recorder;
-  AudioPlayer? _player;
-  Timer? _recordingTimer;
-  Timer? _amplitudeTimer;
-  DateTime? _recordingStartTime;
-  StreamSubscription? _playerStateSubscription;
-  StreamSubscription? _playerPositionSubscription;
-  Duration? _totalDuration;
-  String? _currentRecordingPath;
+  FlutterSoundRecorder? _recorder;
+  bool _recorderInitialized = false;
+  StreamSubscription? _recorderSubscription;
+  int _recordingDurationMs = 0; // 录音时长（毫秒），由 onProgress 回调更新
+  Timer? _secondsTimer; // 用于 UI 显示的秒数计时器
 
   /// 最大录音时长（秒）
   static const int maxRecordingDuration = 60;
-
-  /// 最小录音时长（秒），低于此时长不发送
-  static const int minRecordingDuration = 1;
-
-  /// 最小有效文件大小（字节），低于此大小认为录音失败
-  static const int minValidFileSize = 1024; // 1KB
+  /// 最小录音时长（毫秒），低于此时长不发送
+  static const int minRecordingDurationMs = 1000;
 
   // ═══════════════════════════════════════════════════════
-  // 权限管理
+  // 内部变量 — 播放（audioplayers，参考官方 Demo）
   // ═══════════════════════════════════════════════════════
 
-  /// 检查麦克风权限
-  /// 返回权限状态，调用者根据状态决定是否引导用户去设置页面
-  Future<TZAudioPermissionStatus> checkPermission() async {
+  /// 播放器 map（和官方一样，用 messageId 作为 key）
+  final Map<String, AudioPlayer> _players = {};
+  StreamSubscription? _playerStateSubscription;
+  StreamSubscription? _playerPositionSubscription;
+  Duration? _totalDuration;
+
+  // ═══════════════════════════════════════════════════════
+  // 初始化
+  // ═══════════════════════════════════════════════════════
+
+  /// 初始化录音器（在 app 启动或进入聊天页面时调用）
+  Future<void> initRecorder() async {
     try {
-      // 用临时实例检查权限，检查完立即 dispose
-      final tempRecorder = AudioRecorder();
-      final hasPermission = await tempRecorder.hasPermission();
-      await tempRecorder.dispose();
-
-      if (hasPermission) {
-        _lastPermissionStatus = TZAudioPermissionStatus.granted;
-        _permissionRequestCount = 0;
-        _log('麦克风权限已授予');
-      } else {
-        _permissionRequestCount++;
-        if (_permissionRequestCount >= 2) {
-          _lastPermissionStatus = TZAudioPermissionStatus.permanentlyDenied;
-          _log('麦克风权限被永久拒绝（请求次数: $_permissionRequestCount）');
-        } else {
-          _lastPermissionStatus = TZAudioPermissionStatus.denied;
-          _log('麦克风权限被拒绝（请求次数: $_permissionRequestCount）');
-        }
-      }
-
-      return _lastPermissionStatus;
+      _recorder = FlutterSoundRecorder();
+      await _recorder!.openRecorder();
+      // 设置录音进度回调间隔（官方用 10ms，我们用 100ms 足够）
+      await _recorder!.setSubscriptionDuration(const Duration(milliseconds: 100));
+      _recorderInitialized = true;
+      _log('录音器初始化成功');
     } catch (e) {
-      _log('检查权限异常: $e');
-      _lastPermissionStatus = TZAudioPermissionStatus.unknown;
-      return TZAudioPermissionStatus.unknown;
+      _log('录音器初始化失败: $e');
+      _recorderInitialized = false;
+    }
+  }
+
+  /// 初始化播放器（参考官方 Demo 的 initAudioPlayer）
+  void initAudioPlayer() {
+    _setupSpeaker();
+  }
+
+  /// 设置播放器音频上下文（参考官方 Demo）
+  Future<void> _setupSpeaker() async {
+    try {
+      final audioContext = AudioContext(
+        android: AudioContextAndroid(
+          usageType: AndroidUsageType.media,
+          audioMode: AndroidAudioMode.normal,
+          isSpeakerphoneOn: true,
+        ),
+        iOS: AudioContextIOS(
+          category: AVAudioSessionCategory.playback,
+          options: {AVAudioSessionOptions.mixWithOthers},
+        ),
+      );
+      await AudioPlayer.global.setAudioContext(audioContext);
+      _log('播放器音频上下文设置成功');
+    } catch (e) {
+      _log('设置播放器音频上下文失败: $e');
     }
   }
 
   // ═══════════════════════════════════════════════════════
-  // 录音功能
+  // 权限管理（使用 permission_handler，参考官方 Demo）
+  // ═══════════════════════════════════════════════════════
+
+  /// 请求麦克风权限
+  /// 返回 true 表示已授权
+  Future<bool> requestMicrophonePermission() async {
+    try {
+      final status = await Permission.microphone.request();
+      _log('麦克风权限状态: $status');
+      return status.isGranted;
+    } catch (e) {
+      _log('请求麦克风权限异常: $e');
+      return false;
+    }
+  }
+
+  /// 检查麦克风权限是否已授权
+  Future<bool> isMicrophoneGranted() async {
+    return await Permission.microphone.isGranted;
+  }
+
+  /// 检查麦克风权限是否被永久拒绝
+  Future<bool> isMicrophonePermanentlyDenied() async {
+    return await Permission.microphone.isPermanentlyDenied;
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 录音功能（参考官方 Demo 的 record_panel.dart）
   // ═══════════════════════════════════════════════════════
 
   /// 开始录音
-  /// 返回值：
-  /// - true: 录音成功开始
-  /// - false: 录音失败（权限问题或其他错误）
   Future<bool> startRecording() async {
     if (_state != TZAudioState.idle) {
       _log('当前状态不允许录音: $_state');
       return false;
     }
 
+    // 确保录音器已初始化
+    if (!_recorderInitialized || _recorder == null) {
+      await initRecorder();
+    }
+    if (!_recorderInitialized || _recorder == null) {
+      _log('录音器初始化失败，无法录音');
+      return false;
+    }
+
     try {
-      // ═══ 关键修复：每次录音创建全新的 AudioRecorder 实例 ═══
-      // 安卓上复用旧的 AudioRecorder 实例可能导致录音无声
-      // 官方示例也是每次 new AudioRecorder()
-      await _disposeRecorder();
-      _recorder = AudioRecorder();
-
-      // 检查权限（直接用新创建的 recorder 检查）
-      final hasPermission = await _recorder!.hasPermission();
-      if (!hasPermission) {
-        _permissionRequestCount++;
-        if (_permissionRequestCount >= 2) {
-          _lastPermissionStatus = TZAudioPermissionStatus.permanentlyDenied;
-        } else {
-          _lastPermissionStatus = TZAudioPermissionStatus.denied;
-        }
-        _log('没有麦克风权限，状态: $_lastPermissionStatus');
-        // 权限检查失败，dispose 掉刚创建的 recorder
-        await _disposeRecorder();
-        return false;
-      }
-      _lastPermissionStatus = TZAudioPermissionStatus.granted;
-      _permissionRequestCount = 0;
-
-      // 获取临时目录
-      final dir = await getTemporaryDirectory();
+      // 获取临时目录，生成录音文件路径
+      // 官方 Demo 用的是 aacADTS 格式
+      final tempDir = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      _currentRecordingPath = p.join(dir.path, 'voice_$timestamp.m4a');
+      final path = '${tempDir.path}/$timestamp${ext[Codec.aacADTS.index]}';
 
-      // 配置录音参数
-      // 使用标准 44100Hz 采样率 + 128kbps 码率，兼容性最好
-      const config = RecordConfig(
-        encoder: AudioEncoder.aacLc,
-        sampleRate: 44100,
-        bitRate: 128000,
-        numChannels: 1, // 单声道，语音消息足够
+      // 开始录音（参数完全参考官方 Demo）
+      await _recorder!.startRecorder(
+        toFile: path,
+        codec: Codec.aacADTS,
+        bitRate: 64000,
+        numChannels: 1,
+        sampleRate: 48000,
       );
-
-      // 开始录音
-      _log('准备开始录音: $_currentRecordingPath');
-      await _recorder!.start(config, path: _currentRecordingPath!);
 
       _state = TZAudioState.recording;
       _recordingSeconds = 0;
-      _recordingStartTime = DateTime.now();
+      _recordingDurationMs = 0;
       _amplitude = 0.0;
 
-      // 启动计时器
-      _recordingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        _recordingSeconds++;
-        notifyListeners();
+      // 监听录音进度（参考官方 Demo）
+      _recorderSubscription = _recorder!.onProgress!.listen((e) {
+        _recordingDurationMs = e.duration.inMilliseconds;
+
+        // 更新振幅（flutter_sound 的 decibels 范围约 0-120）
+        if (e.decibels != null) {
+          _amplitude = ((e.decibels! - 30) / 70).clamp(0.0, 1.0);
+        }
 
         // 超过最大时长自动停止
-        if (_recordingSeconds >= maxRecordingDuration) {
+        if (e.duration.inSeconds >= maxRecordingDuration) {
           _log('录音达到最大时长，自动停止');
-          _recordingTimer?.cancel();
+          // 不在这里直接 stopRecording，通过通知 UI 来处理
+          _secondsTimer?.cancel();
         }
       });
 
-      // 启动振幅检测（降低频率到 300ms，且仅在变化超过阈值时通知 UI，
-      // 避免 iOS 上因高频 notifyListeners 导致计时器显示跳动）
-      _amplitudeTimer = Timer.periodic(const Duration(milliseconds: 300), (timer) async {
-        if (_recorder == null) return;
-        try {
-          final amp = await _recorder!.getAmplitude();
-          // amp.current 范围是 -160 到 0 (dBFS)，转换为 0-1
-          final normalized = ((amp.current + 50) / 50).clamp(0.0, 1.0);
-          // 仅在振幅变化超过 0.05 时才刷新 UI，减少不必要的重建
-          if ((normalized - _amplitude).abs() > 0.05) {
-            _amplitude = normalized;
-            notifyListeners();
-          }
-        } catch (_) {}
+      // 启动秒数计时器（用于 UI 显示）
+      _secondsTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        _recordingSeconds++;
+        notifyListeners();
+
+        if (_recordingSeconds >= maxRecordingDuration) {
+          _secondsTimer?.cancel();
+        }
       });
 
       notifyListeners();
-      _log('开始录音成功: $_currentRecordingPath');
+      _log('开始录音: $path');
       return true;
     } catch (e) {
       _log('开始录音失败: $e');
       _state = TZAudioState.idle;
-      _currentRecordingPath = null;
-      await _disposeRecorder();
       notifyListeners();
       return false;
     }
@@ -265,37 +259,31 @@ class TZAudioService extends ChangeNotifier {
     }
 
     try {
-      _recordingTimer?.cancel();
-      _amplitudeTimer?.cancel();
+      _secondsTimer?.cancel();
+      _cancelRecorderSubscription();
 
-      final filePath = await _recorder!.stop();
-
-      // ═══ 关键：录音结束后立即 dispose recorder ═══
-      await _disposeRecorder();
-
-      // 计算实际录音时长
-      final durationMs = _recordingStartTime != null
-          ? DateTime.now().difference(_recordingStartTime!).inMilliseconds
-          : 0;
+      // 停止录音，返回文件路径（参考官方 Demo）
+      final filePath = await _recorder!.stopRecorder();
 
       _state = TZAudioState.idle;
       _amplitude = 0.0;
       notifyListeners();
+
+      _log('stopRecorder 返回路径: $filePath, duration: $_recordingDurationMs ms');
 
       if (filePath == null || filePath.isEmpty) {
         _log('录音文件路径为空');
         return null;
       }
 
-      // 检查最小时长
-      final durationSeconds = (durationMs / 1000).round();
-      if (durationSeconds < minRecordingDuration) {
-        _log('录音时长不足 ${minRecordingDuration} 秒，取消发送');
+      // 检查最小时长（参考官方 Demo 的 _minLength = 1000ms）
+      if (_recordingDurationMs < minRecordingDurationMs) {
+        _log('录音时长不足 ${minRecordingDurationMs}ms (实际: ${_recordingDurationMs}ms)，取消发送');
         _deleteFile(filePath);
         return null;
       }
 
-      // 验证录音文件大小
+      // 验证文件
       final file = File(filePath);
       if (!await file.exists()) {
         _log('录音文件不存在: $filePath');
@@ -303,24 +291,22 @@ class TZAudioService extends ChangeNotifier {
       }
 
       final fileSize = await file.length();
-      _log('录音文件大小: $fileSize bytes, 时长: ${durationMs}ms');
+      _log('录音文件大小: $fileSize bytes');
 
-      if (fileSize < minValidFileSize) {
-        _log('录音文件太小 ($fileSize bytes < $minValidFileSize bytes)，可能录音失败');
+      if (fileSize < 100) {
+        _log('录音文件太小，可能录音失败');
         _deleteFile(filePath);
         return null;
       }
 
-      _log('录音完成: $filePath, 时长: ${durationMs}ms, 大小: ${fileSize}bytes');
       return RecordingResult(
         filePath: filePath,
-        durationMs: durationMs,
+        durationMs: _recordingDurationMs,
         fileSize: fileSize,
       );
     } catch (e) {
       _log('停止录音失败: $e');
       _state = TZAudioState.idle;
-      await _disposeRecorder();
       notifyListeners();
       return null;
     }
@@ -331,41 +317,44 @@ class TZAudioService extends ChangeNotifier {
     if (_state != TZAudioState.recording) return;
 
     try {
-      _recordingTimer?.cancel();
-      _amplitudeTimer?.cancel();
+      _secondsTimer?.cancel();
+      _cancelRecorderSubscription();
 
-      final filePath = await _recorder!.stop();
+      final filePath = await _recorder!.stopRecorder();
 
       // 删除录音文件
       if (filePath != null && filePath.isNotEmpty) {
         _deleteFile(filePath);
       }
 
-      // dispose recorder
-      await _disposeRecorder();
-
       _state = TZAudioState.idle;
       _recordingSeconds = 0;
+      _recordingDurationMs = 0;
       _amplitude = 0.0;
-      _currentRecordingPath = null;
       notifyListeners();
       _log('录音已取消');
     } catch (e) {
       _log('取消录音失败: $e');
       _state = TZAudioState.idle;
-      await _disposeRecorder();
       notifyListeners();
     }
   }
 
+  /// 取消录音进度监听
+  void _cancelRecorderSubscription() {
+    _recorderSubscription?.cancel();
+    _recorderSubscription = null;
+  }
+
   // ═══════════════════════════════════════════════════════
-  // 播放功能
+  // 播放功能（参考官方 Demo 的 audio_player.dart）
   // ═══════════════════════════════════════════════════════
 
   /// 播放语音消息
   /// [source] 可以是本地文件路径或远程 URL
   /// [messageId] 用于标识当前播放的消息
-  Future<void> playAudio(String source, {String? messageId}) async {
+  /// [durationMs] 音频总时长（毫秒），用于计算进度
+  Future<void> playAudio(String source, {String? messageId, int? durationMs}) async {
     // 如果正在播放同一条消息，则停止
     if (_state == TZAudioState.playing && _playingMessageId == messageId) {
       await stopPlaying();
@@ -384,62 +373,84 @@ class TZAudioService extends ChangeNotifier {
     }
 
     try {
-      // 每次播放前重新创建 AudioPlayer
-      await _disposePlayer();
-      _player = AudioPlayer();
+      _setupSpeaker();
+
+      final id = messageId ?? 'default';
+
+      // 清理旧的播放器（参考官方 Demo）
+      _players.forEach((key, value) async {
+        if (key != id) {
+          await value.dispose();
+        }
+      });
+      _players.removeWhere((key, value) => key != id);
+
+      // 创建或复用播放器（参考官方 Demo）
+      if (_players[id] == null) {
+        _players[id] = AudioPlayer(playerId: id);
+      }
+
+      final player = _players[id]!;
 
       _log('准备播放: $source');
-
-      // 设置音频源
-      Duration? duration;
-      if (source.startsWith('http://') || source.startsWith('https://')) {
-        duration = await _player!.setUrl(source);
-      } else {
-        // 本地文件播放前检查文件是否存在
-        final file = File(source);
-        if (!await file.exists()) {
-          _log('本地音频文件不存在: $source');
-          return;
-        }
-        final fileSize = await file.length();
-        _log('本地音频文件大小: $fileSize bytes');
-        if (fileSize < minValidFileSize) {
-          _log('音频文件太小，可能是空文件');
-          return;
-        }
-        duration = await _player!.setFilePath(source);
-      }
 
       _state = TZAudioState.playing;
       _playingMessageId = messageId;
       _playProgress = 0.0;
-      _totalDuration = duration ?? _player!.duration;
+      _totalDuration = durationMs != null ? Duration(milliseconds: durationMs) : null;
       notifyListeners();
 
-      _log('音频时长: ${_totalDuration?.inMilliseconds}ms');
-
-      // 监听播放状态
+      // 监听播放状态（参考官方 Demo）
       _playerStateSubscription?.cancel();
-      _playerStateSubscription = _player!.playerStateStream.listen((state) {
-        if (state.processingState == ProcessingState.completed) {
+      _playerStateSubscription = player.onPlayerStateChanged.listen((event) {
+        if (event == PlayerState.stopped || event == PlayerState.completed) {
           _onPlaybackCompleted();
         }
-      }, onError: (error) {
-        _log('播放流错误: $error');
-        _onPlaybackCompleted();
       });
 
       // 监听播放进度
       _playerPositionSubscription?.cancel();
-      _playerPositionSubscription = _player!.positionStream.listen((position) {
+      _playerPositionSubscription = player.onPositionChanged.listen((position) {
         if (_totalDuration != null && _totalDuration!.inMilliseconds > 0) {
           _playProgress = (position.inMilliseconds / _totalDuration!.inMilliseconds).clamp(0.0, 1.0);
           notifyListeners();
         }
       });
 
-      // 开始播放
-      await _player!.play();
+      // 获取时长
+      _playerPositionSubscription?.cancel();
+      player.onDurationChanged.listen((duration) {
+        if (_totalDuration == null || _totalDuration!.inMilliseconds == 0) {
+          _totalDuration = duration;
+        }
+      });
+
+      // 重新监听进度
+      _playerPositionSubscription = player.onPositionChanged.listen((position) {
+        if (_totalDuration != null && _totalDuration!.inMilliseconds > 0) {
+          _playProgress = (position.inMilliseconds / _totalDuration!.inMilliseconds).clamp(0.0, 1.0);
+          notifyListeners();
+        }
+      });
+
+      // 播放（参考官方 Demo：先尝试 URL，再尝试本地文件）
+      Source audioSource;
+      if (source.startsWith('http://') || source.startsWith('https://')) {
+        audioSource = UrlSource(source);
+      } else {
+        // 本地文件
+        final file = File(source);
+        if (!await file.exists()) {
+          _log('本地音频文件不存在: $source');
+          _state = TZAudioState.idle;
+          _playingMessageId = null;
+          notifyListeners();
+          return;
+        }
+        audioSource = DeviceFileSource(source);
+      }
+
+      await player.play(audioSource);
       _log('开始播放: $source');
     } catch (e) {
       _log('播放失败: $e');
@@ -455,7 +466,11 @@ class TZAudioService extends ChangeNotifier {
     try {
       _playerStateSubscription?.cancel();
       _playerPositionSubscription?.cancel();
-      await _player?.stop();
+
+      // 停止所有播放器（参考官方 Demo 的 stopAll）
+      for (var player in _players.values) {
+        await player.stop();
+      }
     } catch (_) {}
 
     _state = TZAudioState.idle;
@@ -488,43 +503,47 @@ class TZAudioService extends ChangeNotifier {
     }
   }
 
-  /// 安全释放录音器
-  Future<void> _disposeRecorder() async {
-    try {
-      await _recorder?.dispose();
-    } catch (e) {
-      _log('释放录音器异常: $e');
-    }
-    _recorder = null;
-  }
-
-  /// 释放播放器资源
-  Future<void> _disposePlayer() async {
-    try {
-      _playerStateSubscription?.cancel();
-      _playerPositionSubscription?.cancel();
-      _playerStateSubscription = null;
-      _playerPositionSubscription = null;
-      await _player?.dispose();
-      _player = null;
-    } catch (e) {
-      _log('释放播放器异常: $e');
-      _player = null;
-    }
-  }
-
   // ═══════════════════════════════════════════════════════
   // 资源释放
   // ═══════════════════════════════════════════════════════
 
-  @override
-  void dispose() {
-    _recordingTimer?.cancel();
-    _amplitudeTimer?.cancel();
+  /// 释放所有资源（参考官方 Demo 的 release）
+  void releaseAll() {
+    _secondsTimer?.cancel();
+    _cancelRecorderSubscription();
     _playerStateSubscription?.cancel();
     _playerPositionSubscription?.cancel();
-    _recorder?.dispose();
-    _player?.dispose();
+
+    // 释放播放器
+    for (var player in _players.values) {
+      player.dispose();
+    }
+    _players.clear();
+
+    _state = TZAudioState.idle;
+    _playingMessageId = null;
+    _playProgress = 0.0;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _secondsTimer?.cancel();
+    _cancelRecorderSubscription();
+    _playerStateSubscription?.cancel();
+    _playerPositionSubscription?.cancel();
+
+    // 释放录音器
+    try {
+      _recorder?.closeRecorder();
+    } catch (_) {}
+
+    // 释放播放器
+    for (var player in _players.values) {
+      player.dispose();
+    }
+    _players.clear();
+
     super.dispose();
   }
 

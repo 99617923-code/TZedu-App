@@ -352,7 +352,7 @@ class ChatMessageService extends ChangeNotifier {
       final fileSize = await audioFile.length();
       _log('发送语音消息到: $conversationId, 文件: $audioPath, '
           '大小: ${fileSize}bytes, 时长: ${duration}ms');
-      if (fileSize < 1024) {
+      if (fileSize < 100) {
         _log('音频文件太小 ($fileSize bytes)，可能录音失败');
         return null;
       }
@@ -989,7 +989,8 @@ class ChatMessageService extends ChangeNotifier {
   String? _extractFileUrl(NIMMessage msg) {
     final attachment = msg.attachment;
     if (attachment is NIMMessageFileAttachment) {
-      return attachment.url;
+      // 优先返回远程 URL，如果没有则返回本地路径（参考官方 Demo）
+      return attachment.url ?? attachment.path;
     }
     return null;
   }
