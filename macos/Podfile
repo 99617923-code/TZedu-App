@@ -1,16 +1,13 @@
 # 途正英语 macOS Podfile
 # 火鹰科技出品
 #
-# nim_core_v2 的 build 脚本依赖 Python requests 模块下载原生 SDK，
-# pre_install hook 会自动检测并安装，开发者无需手动操作。
-#
-# flutter_sound 仅在 iOS/Android 上使用（录音功能），macOS 上语音播放
-# 由 audioplayers 提供。flutter_sound 的 macOS podspec 文件名和 spec.name
-# 均为 taudio（与包名 flutter_sound 不一致），需要生成正确的 podspec 修复。
+# flutter_sound 仅在 iOS/Android 上使用（录音功能），macOS 不需要。
+# macOS 上语音播放由 audioplayers 提供。
+# flutter_sound 包的 macOS podspec 有 bug（文件名和 spec.name 不匹配），
+# 因此在 macOS 上直接跳过该插件。
 
 platform :osx, '10.15'
 
-# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
 
 project 'Runner', {
@@ -37,40 +34,50 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 flutter_macos_podfile_setup
 
 # ═══════════════════════════════════════════════════════════
-# 修复 flutter_sound macOS podspec 问题
+# macOS 上需要跳过的插件列表
+# flutter_sound 的 macOS podspec 有 bug，且 macOS 不需要录音功能
 # ═══════════════════════════════════════════════════════════
-# flutter_sound 包的 macOS podspec 文件名为 taudio.podspec，且内部
-# spec.name = 'taudio'，但 Flutter 插件系统期望 spec.name = 'flutter_sound'。
-# 此方法在 flutter_install_all_macos_pods 之后调用，生成一个 name 正确的
-# flutter_sound.podspec 文件，CocoaPods 分析依赖时即可正确匹配。
-def fix_flutter_sound_podspec_macos(application_path)
-  symlink_plugins_dir = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks', 'plugins'), application_path)
-  flutter_sound_macos = File.join(symlink_plugins_dir, 'flutter_sound', 'macos')
-  return unless Dir.exist?(flutter_sound_macos)
+MACOS_SKIP_PLUGINS = ['flutter_sound']
 
-  flutter_sound_podspec = File.join(flutter_sound_macos, 'flutter_sound.podspec')
+# 自定义 pod 安装方法：基于 Flutter 官方 flutter_install_plugin_pods，
+# 但跳过 MACOS_SKIP_PLUGINS 中列出的插件
+def flutter_install_macos_pods_excluding(application_path)
+  application_path ||= File.dirname(defined_in_file.realpath) if respond_to?(:defined_in_file)
+  raise 'Could not find application path' unless application_path
 
-  # 每次都重新生成，确保内容正确
-  podspec_content = <<~PODSPEC
-    Pod::Spec.new do |s|
-      s.name             = 'flutter_sound'
-      s.version          = '9.30.0'
-      s.summary          = 'Flutter Sound - audio playback and recording plugin'
-      s.description      = 'A complete api for audio playback and recording.'
-      s.homepage         = 'https://github.com/canardoux/flutter_sound'
-      s.license          = { :file => '../LICENSE' }
-      s.author           = { 'canardoux' => 'canardoux@gmail.com' }
-      s.source           = { :path => '.' }
-      s.source_files     = 'Classes/**/*'
-      s.dependency 'FlutterMacOS'
-      s.platform         = :osx, '10.11'
-      s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
-      s.swift_version    = '5.0'
+  symlink_dir = File.expand_path(File.join('Flutter', 'ephemeral', '.symlinks'), application_path)
+  system('rm', '-rf', symlink_dir)
+  symlink_plugins_dir = File.expand_path('plugins', symlink_dir)
+  system('mkdir', '-p', symlink_plugins_dir)
+
+  plugins_file = File.join(application_path, '..', '.flutter-plugins-dependencies')
+  dependencies_hash = flutter_parse_plugins_file(plugins_file)
+  plugin_pods = flutter_get_plugins_list(dependencies_hash, 'macos')
+
+  plugin_pods.each do |plugin_hash|
+    plugin_name = plugin_hash['name']
+    plugin_path = plugin_hash['path']
+    has_native_build = plugin_hash.fetch('native_build', true)
+    shared_darwin_source = plugin_hash.fetch('shared_darwin_source', false)
+    platform_directory = shared_darwin_source ? 'darwin' : 'macos'
+
+    next unless plugin_name && plugin_path && has_native_build
+
+    # 跳过不需要的插件
+    if MACOS_SKIP_PLUGINS.include?(plugin_name)
+      puts "[TZ] ⏭️  跳过 macOS 插件: #{plugin_name}（不需要）"
+      next
     end
-  PODSPEC
 
-  File.write(flutter_sound_podspec, podspec_content)
-  puts "[TZ] ✅ 已生成 flutter_sound.podspec（修复 spec.name: taudio -> flutter_sound）"
+    symlink = File.join(symlink_plugins_dir, plugin_name)
+    File.symlink(plugin_path, symlink)
+
+    relative = flutter_relative_path_from_podfile(symlink)
+    pod plugin_name, path: File.join(relative, platform_directory)
+  end
+
+  # FlutterMacOS pod
+  pod 'FlutterMacOS', path: File.join('Flutter', 'ephemeral')
 end
 
 # ═══════════════════════════════════════════════════════════
@@ -92,18 +99,14 @@ target 'Runner' do
   use_frameworks!
   use_modular_headers!
 
-  flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
-
-  # 在 flutter_install_all_macos_pods 之后修复 podspec，
-  # CocoaPods 的 Analyzing dependencies 在 Podfile 解析完成后才执行。
-  fix_flutter_sound_podspec_macos(File.dirname(File.realpath(__FILE__)))
+  # 使用自定义方法安装 pods，跳过 flutter_sound
+  flutter_install_macos_pods_excluding(File.dirname(File.realpath(__FILE__)))
 end
 
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_macos_build_settings(target)
 
-    # 确保最低部署版本一致
     target.build_configurations.each do |config|
       config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '10.15'
     end
