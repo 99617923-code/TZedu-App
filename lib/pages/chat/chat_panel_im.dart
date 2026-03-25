@@ -30,6 +30,9 @@ import '../../services/conversation_service.dart';
 import '../../services/notification_service.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:fluttertoast/fluttertoast.dart';
+import 'package:flutter_sound/flutter_sound.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:path_provider/path_provider.dart';
 import '../../services/audio_service.dart';
 import '../../services/team_service.dart';
 import 'team_info_page.dart';
@@ -55,6 +58,20 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
   StreamSubscription? _messageSub;
   StreamSubscription? _revokeSub;
 
+  // ═══ 录音相关（直接复制自官方 Demo record_panel.dart）═══
+  FlutterSoundRecorder _recorderModule = FlutterSoundRecorder();
+  StreamSubscription? _recorderSubscription;
+  bool _isRecorderInited = false;
+  bool _isRecording = false;
+  int _recordingDurationMs = 0;
+  static const int _maxRecordLength = 60; // 最大录制时间60秒
+  static const int _minRecordLength = 1000; // 最小录制时间1000ms
+
+  // ═══ 播放相关 ═══
+  String? _playingMessageId;
+  Timer? _playAniTimer;
+  bool _isPlayingAudio = false;
+
   String get _myAccid => IMService.instance.currentAccid ?? '';
 
   /// 从 conversationId 中提取 targetId
@@ -76,9 +93,10 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     AppNotificationService.instance.setActiveConversation(widget.conversationId);
     // 设置会话服务的活跃会话，避免重复增加未读数
     TZConversationService.instance.setActiveConversation(widget.conversationId);
-    // 初始化录音器和播放器（参考官方 Demo）
-    TZAudioService.instance.initRecorder();
-    TZAudioService.instance.initAudioPlayer();
+    // 初始化录音器（直接复制自官方 Demo initRecoder）
+    _initRecorder();
+    // 初始化播放器（直接复制自官方 Demo ChatAudioPlayer）
+    TZAudioPlayer.instance.initAudioPlayer();
     _loadConversationInfo();
     _loadHistoryMessages();
     _listenNewMessages();
@@ -106,8 +124,12 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     // 清除活跃会话，恢复通知显示
     AppNotificationService.instance.setActiveConversation(null);
     TZConversationService.instance.setActiveConversation(null);
-    // 释放录音和播放资源（参考官方 Demo）
-    TZAudioService.instance.releaseAll();
+    // 释放录音资源（直接复制自官方 Demo dispose）
+    _recorderSubscription?.cancel();
+    _recorderModule.closeRecorder();
+    // 释放播放资源
+    _playAniTimer?.cancel();
+    TZAudioPlayer.instance.release();
     _inputController.dispose();
     _scrollController.dispose();
     _messageSub?.cancel();
@@ -439,19 +461,28 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
   }
 
   // ═══════════════════════════════════════════════════════
-  // 语音消息
+  // 语音消息（录音直接复制自官方 Demo record_panel.dart）
   // ═══════════════════════════════════════════════════════
 
-  /// 开始录音
-   Future<void> _startRecording() async {
-    final audioService = TZAudioService.instance;
+  /// 初始化录音器（直接复制自官方 Demo initRecoder）
+  Future<void> _initRecorder() async {
+    try {
+      await _recorderModule.openRecorder();
+      await _recorderModule.setSubscriptionDuration(const Duration(milliseconds: 10));
+      _isRecorderInited = true;
+      debugPrint('[ChatPanelIM] 录音器初始化成功');
+    } catch (e) {
+      debugPrint('[ChatPanelIM] 录音器初始化失败: $e');
+      _isRecorderInited = false;
+    }
+  }
 
-    // 先检查并请求麦克风权限（参考官方 Demo 使用 permission_handler）
-    final hasPermission = await audioService.requestMicrophonePermission();
-    if (!hasPermission) {
-      // 检查是否被永久拒绝
-      final isPermanentlyDenied = await audioService.isMicrophonePermanentlyDenied();
-      if (isPermanentlyDenied) {
+  /// 开始录音（直接复制自官方 Demo _startRecorder）
+  Future<void> _startRecording() async {
+    // 先检查麦克风权限
+    final status = await Permission.microphone.request();
+    if (!status.isGranted) {
+      if (status.isPermanentlyDenied) {
         _showPermissionDeniedDialog();
       } else {
         Fluttertoast.showToast(msg: '请允许麦克风权限后重试');
@@ -459,11 +490,55 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
       return;
     }
 
-    // 停止当前播放（参考官方 Demo）
-    await audioService.stopPlaying();
+    // 如果录音器未初始化，重试
+    if (!_isRecorderInited) {
+      await _initRecorder();
+      if (!_isRecorderInited) {
+        Fluttertoast.showToast(msg: '录音启动失败，请重试');
+        return;
+      }
+    }
 
-    final started = await audioService.startRecording();
-    if (!started && mounted) {
+    // 停止当前播放（与官方 Demo 一致）
+    TZAudioPlayer.instance.stopAll();
+
+    try {
+      Directory tempDir = await getTemporaryDirectory();
+      var time = DateTime.now().millisecondsSinceEpoch;
+      String path = '${tempDir.path}/$time${ext[Codec.aacADTS.index]}';
+
+      _recordingDurationMs = 0;
+
+      // 与官方 Demo 完全一致的录音参数
+      await _recorderModule.startRecorder(
+        toFile: path,
+        codec: Codec.aacADTS,
+        bitRate: 64000,
+        numChannels: 1,
+        sampleRate: 48000,
+      );
+
+      _isRecording = true;
+      setState(() {});
+
+      // 监听录音进度（与官方 Demo 一致）
+      _recorderSubscription = _recorderModule.onProgress!.listen((e) {
+        _recordingDurationMs = e.duration.inMilliseconds;
+        setState(() {});
+        // 最大录音时长
+        if (e.duration.inSeconds >= _maxRecordLength) {
+          _isRecording = false;
+          setState(() {});
+          _stopRecordingAndSend();
+        }
+      });
+
+      debugPrint('[ChatPanelIM] 开始录音: $path');
+    } catch (err) {
+      debugPrint('[ChatPanelIM] 录音启动失败: $err');
+      _isRecording = false;
+      _recorderSubscription?.cancel();
+      setState(() {});
       Fluttertoast.showToast(msg: '录音启动失败，请重试');
     }
   }
@@ -482,7 +557,7 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
           TextButton(
             onPressed: () {
               Navigator.pop(ctx);
-              openAppSettings(); // permission_handler 提供的跳转系统设置
+              openAppSettings();
             },
             child: const Text('去设置'),
           ),
@@ -495,104 +570,177 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
     );
   }
 
-  /// 停止录音并发送
+  /// 停止录音并发送（直接复制自官方 Demo _stopRecorder）
   Future<void> _stopRecordingAndSend() async {
-    final audioService = TZAudioService.instance;
-    final result = await audioService.stopRecording();
+    if (!_isRecording) return;
 
-    if (result == null) {
-      // 录音时间太短或失败（参考官方 Demo 使用 Fluttertoast）
-      Fluttertoast.showToast(msg: '说话时间太短');
+    try {
+      _recorderSubscription?.cancel();
+      _recorderSubscription = null;
+
+      final filePath = await _recorderModule.stopRecorder();
+      final duration = _recordingDurationMs;
+
+      _isRecording = false;
+      setState(() {});
+
+      debugPrint('[ChatPanelIM] 停止录音, 路径: $filePath, 时长: ${duration}ms');
+
+      // 检查最小时长（与官方 Demo 一致）
+      if (duration <= _minRecordLength) {
+        Fluttertoast.showToast(msg: '说话时间太短');
+        return;
+      }
+
+      if (filePath == null || filePath.isEmpty) {
+        debugPrint('[ChatPanelIM] 录音文件路径为空');
+        return;
+      }
+
+      // 计算时长（毫秒转秒，向上取整，至少 1 秒）
+      final durationSeconds = (duration / 1000).ceil().clamp(1, 60);
+
+      // 添加发送中的本地消息
+      final tempMsg = TZMessage(
+        messageId: 'temp-audio-${DateTime.now().millisecondsSinceEpoch}',
+        conversationId: widget.conversationId,
+        senderId: _myAccid,
+        senderName: '我',
+        type: TZMessageType.audio,
+        audioDuration: durationSeconds,
+        timestamp: DateTime.now(),
+        status: TZMessageStatus.sending,
+      );
+      setState(() => _messages.add(tempMsg));
+      _scrollToBottom();
+
+      // 通过 SDK 发送语音消息（与官方 Demo sendAudioMessage 一致，传入毫秒）
+      final sendResult = await ChatMessageService.instance.sendAudioMessage(
+        widget.conversationId,
+        filePath,
+        duration, // 直接传毫秒（与官方 Demo 一致）
+      );
+
+      setState(() {
+        _messages.removeWhere((m) => m.messageId == tempMsg.messageId);
+        if (sendResult != null) {
+          _messages.add(sendResult);
+          _updateLocalConversation('[语音] ${durationSeconds}s');
+        } else {
+          _messages.add(TZMessage(
+            messageId: tempMsg.messageId,
+            conversationId: widget.conversationId,
+            senderId: _myAccid,
+            type: TZMessageType.audio,
+            audioDuration: durationSeconds,
+            timestamp: DateTime.now(),
+            status: TZMessageStatus.failed,
+          ));
+        }
+      });
+      _scrollToBottom();
+    } catch (err) {
+      debugPrint('[ChatPanelIM] 停止录音失败: $err');
+      _isRecording = false;
+      setState(() {});
+    }
+  }
+
+  /// 取消录音（直接复制自官方 Demo onLongPressCancel）
+  Future<void> _cancelRecording() async {
+    if (!_isRecording) return;
+    try {
+      _recorderSubscription?.cancel();
+      _recorderSubscription = null;
+      await _recorderModule.stopRecorder();
+    } catch (e) {
+      debugPrint('[ChatPanelIM] 取消录音失败: $e');
+    }
+    _isRecording = false;
+    _recordingDurationMs = 0;
+    setState(() {});
+  }
+
+  /// 播放语音消息（直接复制自官方 Demo _startAudioPlay）
+  Future<void> _playAudioMessage(TZMessage msg) async {
+    final messageId = msg.messageId;
+
+    // 如果正在播放同一条，停止
+    if (_isPlayingAudio && _playingMessageId == messageId) {
+      _stopAudioPlay();
       return;
     }
 
-    debugPrint('[ChatPanelIM] 录音文件: ${result.filePath}, '
-        '大小: ${result.fileSize} bytes, 时长: ${result.durationMs}ms');
+    // 停止之前的播放
+    _stopAudioPlay();
 
-    // 计算时长（毫秒转秒，向上取整，至少 1 秒）
-    final durationSeconds = (result.durationMs / 1000).ceil().clamp(1, 60);
+    // 从 NIM 消息附件获取音频源（与官方 Demo _startAudioPlay 完全一致）
+    Source? audioSource;
+    int audioDurationMs = (msg.audioDuration ?? 0) * 1000;
 
-    // 添加发送中的本地消息
-    final tempMsg = TZMessage(
-      messageId: 'temp-audio-${DateTime.now().millisecondsSinceEpoch}',
-      conversationId: widget.conversationId,
-      senderId: _myAccid,
-      senderName: '我',
-      type: TZMessageType.audio,
-      audioDuration: durationSeconds,
-      timestamp: DateTime.now(),
-      status: TZMessageStatus.sending,
-    );
-    setState(() => _messages.add(tempMsg));
-    _scrollToBottom();
-
-    // 通过 SDK 发送语音消息
-    final sendResult = await ChatMessageService.instance.sendAudioMessage(
-      widget.conversationId,
-      result.filePath,
-      durationSeconds * 1000, // SDK 需要毫秒
-    );
-
-    setState(() {
-      _messages.removeWhere((m) => m.messageId == tempMsg.messageId);
-      if (sendResult != null) {
-        _messages.add(sendResult);
-        _updateLocalConversation('[语音] ${durationSeconds}s');
-      } else {
-        _messages.add(TZMessage(
-          messageId: tempMsg.messageId,
-          conversationId: widget.conversationId,
-          senderId: _myAccid,
-          type: TZMessageType.audio,
-          audioDuration: durationSeconds,
-          timestamp: DateTime.now(),
-          status: TZMessageStatus.failed,
-        ));
-      }
-    });
-    _scrollToBottom();
-  }
-
-  /// 取消录音
-  Future<void> _cancelRecording() async {
-    await TZAudioService.instance.cancelRecording();
-  }
-
-  /// 播放语音消息（参考官方 Demo：先尝试本地文件，再回退到 URL）
-  Future<void> _playAudioMessage(TZMessage msg) async {
-    // 优先使用本地文件路径（NIM SDK 会自动下载到本地）
-    String? source = msg.audioUrl;
-    
-    // 尝试从 NIM 消息附件获取本地路径
     if (msg.raw != null) {
       final attachment = msg.raw!.attachment;
       if (attachment is NIMMessageAudioAttachment) {
-        // 先尝试本地路径
-        if (attachment.path != null && attachment.path!.isNotEmpty) {
-          final localFile = File(attachment.path!);
-          if (await localFile.exists()) {
-            source = attachment.path!;
-            debugPrint('[ChatPanelIM] 使用本地音频文件: $source');
-          }
+        // 官方 Demo：先尝试 URL，再尝试本地文件
+        if (attachment.url != null && attachment.url!.isNotEmpty) {
+          audioSource = UrlSource(attachment.url!);
+          debugPrint('[ChatPanelIM] 使用 UrlSource: ${attachment.url}');
+        } else if (attachment.path != null && File(attachment.path!).existsSync()) {
+          audioSource = DeviceFileSource(attachment.path!);
+          debugPrint('[ChatPanelIM] 使用 DeviceFileSource: ${attachment.path}');
         }
-        // 本地没有则用 URL
-        source ??= attachment.url;
+        // 使用附件中的时长（毫秒）
+        if (attachment.duration != null && attachment.duration! > 0) {
+          audioDurationMs = attachment.duration!;
+        }
       }
     }
-    
-    if (source == null || source.isEmpty) {
-      debugPrint('[ChatPanelIM] 语音消息没有可用源, messageId: ${msg.messageId}');
+
+    // 如果从 raw 没取到，回退到 audioUrl
+    if (audioSource == null && msg.audioUrl != null && msg.audioUrl!.isNotEmpty) {
+      final url = msg.audioUrl!;
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        audioSource = UrlSource(url);
+      } else {
+        audioSource = DeviceFileSource(url);
+      }
+      debugPrint('[ChatPanelIM] 回退使用 audioUrl: $url');
+    }
+
+    if (audioSource == null) {
       Fluttertoast.showToast(msg: '语音消息加载失败');
       return;
     }
-    
-    debugPrint('[ChatPanelIM] 播放语音: $source');
-    final durationMs = (msg.audioDuration ?? 0) * 1000;
-    await TZAudioService.instance.playAudio(
-      source, 
-      messageId: msg.messageId,
-      durationMs: durationMs > 0 ? durationMs : null,
+
+    // 播放（与官方 Demo ChatAudioPlayer.play 一致）
+    _isPlayingAudio = true;
+    _playingMessageId = messageId;
+    setState(() {});
+
+    TZAudioPlayer.instance.play(
+      messageId,
+      audioSource,
+      stopAction: () {
+        // 播放结束回调（与官方 Demo stopAction 一致）
+        _playAniTimer?.cancel();
+        if (_isPlayingAudio && mounted) {
+          _isPlayingAudio = false;
+          _playingMessageId = null;
+          setState(() {});
+        }
+      },
     );
+  }
+
+  /// 停止播放
+  void _stopAudioPlay() {
+    if (_playingMessageId != null) {
+      TZAudioPlayer.instance.stop(_playingMessageId!);
+    }
+    _playAniTimer?.cancel();
+    _isPlayingAudio = false;
+    _playingMessageId = null;
+    if (mounted) setState(() {});
   }
 
   /// 重发失败的消息
@@ -1498,74 +1646,64 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
   Widget _buildAudioBubble(TZMessage msg, bool isMine) {
     final duration = msg.audioDuration ?? 0;
     final width = 80.0 + (duration * 3).clamp(0, 120).toDouble();
+    final isPlayingThis = _isPlayingAudio && _playingMessageId == msg.messageId;
 
-    return ListenableBuilder(
-      listenable: TZAudioService.instance,
-      builder: (context, _) {
-        final audioService = TZAudioService.instance;
-        final isPlayingThis = audioService.isPlaying && audioService.playingMessageId == msg.messageId;
-
-        return GestureDetector(
-          onTap: () => _playAudioMessage(msg),
-          child: Container(
-            width: width,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: isMine
-                  ? const Color(0xFF7C3AED)
-                  : Colors.white,
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(isMine ? 16 : 4),
-                topRight: Radius.circular(isMine ? 4 : 16),
-                bottomLeft: const Radius.circular(16),
-                bottomRight: const Radius.circular(16),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.04),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  isPlayingThis ? Icons.pause : Icons.play_arrow,
-                  size: 18,
-                  color: isMine ? Colors.white : const Color(0xFF7C3AED),
-                ),
-                const SizedBox(width: 4),
-                // 动态音波指示器
-                ...List.generate(3, (i) {
-                  final baseH = 8.0 + (i * 4);
-                  final animH = isPlayingThis
-                      ? baseH * (0.5 + audioService.playProgress * 0.5)
-                      : baseH;
-                  return Container(
-                    width: 3,
-                    height: animH,
-                    margin: const EdgeInsets.symmetric(horizontal: 1),
-                    decoration: BoxDecoration(
-                      color: (isMine ? Colors.white : const Color(0xFF7C3AED)).withOpacity(isPlayingThis ? 1.0 : 0.6),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  );
-                }),
-                const Spacer(),
-                Text(
-                  '${duration}″',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: isMine ? Colors.white : const Color(0xFF6B7280),
-                  ),
-                ),
-              ],
-            ),
+    return GestureDetector(
+      onTap: () => _playAudioMessage(msg),
+      child: Container(
+        width: width,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: isMine
+              ? const Color(0xFF7C3AED)
+              : Colors.white,
+          borderRadius: BorderRadius.only(
+            topLeft: Radius.circular(isMine ? 16 : 4),
+            topRight: Radius.circular(isMine ? 4 : 16),
+            bottomLeft: const Radius.circular(16),
+            bottomRight: const Radius.circular(16),
           ),
-        );
-      },
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              isPlayingThis ? Icons.pause : Icons.play_arrow,
+              size: 18,
+              color: isMine ? Colors.white : const Color(0xFF7C3AED),
+            ),
+            const SizedBox(width: 4),
+            // 音波指示器
+            ...List.generate(3, (i) {
+              final baseH = 8.0 + (i * 4);
+              return Container(
+                width: 3,
+                height: baseH,
+                margin: const EdgeInsets.symmetric(horizontal: 1),
+                decoration: BoxDecoration(
+                  color: (isMine ? Colors.white : const Color(0xFF7C3AED)).withOpacity(isPlayingThis ? 1.0 : 0.6),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              );
+            }),
+            const Spacer(),
+            Text(
+              '${duration}″',
+              style: TextStyle(
+                fontSize: 12,
+                color: isMine ? Colors.white : const Color(0xFF6B7280),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1914,29 +2052,23 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
                   ),
                 )
               else if (!kIsWeb && (Platform.isIOS || Platform.isAndroid))
-                // 录音按钮 — 仅移动端显示（桌面端无发语音场景，与微信桌面端一致）
+                // 录音按钮 — 仅移动端显示
                 GestureDetector(
                   onLongPressStart: (_) => _startRecording(),
                   onLongPressEnd: (_) => _stopRecordingAndSend(),
                   onLongPressCancel: () => _cancelRecording(),
-                  child: ListenableBuilder(
-                    listenable: TZAudioService.instance,
-                    builder: (context, _) {
-                      final isRec = TZAudioService.instance.isRecording;
-                      return Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          color: isRec ? const Color(0xFFEF4444) : const Color(0xFFF3F4F6),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Icon(
-                          Icons.mic,
-                          size: 18,
-                          color: isRec ? Colors.white : const Color(0xFF6B7280),
-                        ),
-                      );
-                    },
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: _isRecording ? const Color(0xFFEF4444) : const Color(0xFFF3F4F6),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(
+                      Icons.mic,
+                      size: 18,
+                      color: _isRecording ? Colors.white : const Color(0xFF6B7280),
+                    ),
                   ),
                 ),
               // 附件按钮（+号）— 暂时隐藏，待相册/拍照/视频/文件功能完善后恢复
@@ -1949,47 +2081,40 @@ class _ChatPanelIMState extends State<ChatPanelIM> {
             ],
           ),
           // 录音提示
-          ListenableBuilder(
-            listenable: TZAudioService.instance,
-            builder: (context, _) {
-              if (!TZAudioService.instance.isRecording) return const SizedBox.shrink();
-              final seconds = TZAudioService.instance.recordingSeconds;
-              final amp = TZAudioService.instance.amplitude;
-              return Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFEF2F2),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      // 动态振幅指示器
-                      ...List.generate(5, (i) {
-                        final h = 4.0 + (amp * 12 * ((i % 3) + 1) / 3);
-                        return Container(
-                          width: 3,
-                          height: h.clamp(4.0, 16.0),
-                          margin: const EdgeInsets.symmetric(horizontal: 1),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFEF4444),
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        );
-                      }),
-                      const SizedBox(width: 8),
-                      Text(
-                        '${seconds}s  松开发送，上滑取消',
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFFEF4444)),
-                      ),
-                    ],
-                  ),
+          if (_isRecording)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF2F2),
+                  borderRadius: BorderRadius.circular(12),
                 ),
-              );
-            },
-          ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // 动态振幅指示器
+                    ...List.generate(5, (i) {
+                      final baseH = 4.0 + ((i % 3) + 1) * 4.0;
+                      return Container(
+                        width: 3,
+                        height: baseH,
+                        margin: const EdgeInsets.symmetric(horizontal: 1),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFEF4444),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      );
+                    }),
+                    const SizedBox(width: 8),
+                    Text(
+                      '${(_recordingDurationMs / 1000).floor()}s  松开发送，上滑取消',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFFEF4444)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
